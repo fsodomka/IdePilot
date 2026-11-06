@@ -27,8 +27,11 @@ tasks.withType(JavaCompile).configureEach {
 def platformLocalPath = providers.gradleProperty('platformLocalPath').filter { !it.isBlank() }
 
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.opentest4j:opentest4j:1.3.0'
     intellijPlatform {
         intellijIdea(providers.gradleProperty('platformVersion'))
+        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform.INSTANCE)
     }
 }
 
@@ -48,6 +51,11 @@ intellijPlatform {
 tasks.withType(org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask).configureEach {
     maxHeapSize = '4g'
     autoReload = false
+    // the MCP token, from idePilotToken in ~/.gradle/gradle.properties; without it the plugin generates one
+    def idePilotToken = providers.gradleProperty('idePilotToken')
+    if (idePilotToken.isPresent()) {
+        jvmArgs("-Didepilot.token=${idePilotToken.get()}")
+    }
 }
 
 if (platformLocalPath.isPresent()) {
