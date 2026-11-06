@@ -95,6 +95,21 @@ def main():
     step("wait for smart mode")
     client.call("pilot_wait_for", smart=True, timeout=300)
 
+    step("close projects left open by an interrupted run")
+    # their project views show hello.txt too, so waiting for it to be gone would time out
+    stale, closing = re.compile(r'^- window "(idepilot-smoke-[^"]*)".*\[ref=(e[\d.]+)]', re.M), set()
+    for _ in range(150):  # CloseProject returns at once; wait_for gone won't do, recent projects keep the name shown
+        windows = stale.findall(full_snapshot(client))
+        if not windows:
+            break
+        for title, ref in windows:
+            if title not in closing:
+                closing.add(title)
+                client.call("pilot_action", id="CloseProject", ref=ref)
+        time.sleep(0.2)
+    else:
+        raise AssertionError("cannot close the projects of an earlier run")
+
     step("open a throwaway project")
     project = tempfile.mkdtemp(prefix="idepilot-smoke-")
     with open(os.path.join(project, "hello.txt"), "w", encoding="utf-8") as f:

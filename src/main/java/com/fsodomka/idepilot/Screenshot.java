@@ -67,6 +67,8 @@ final class Screenshot {
 
 	/** {@code base} painted, then each of {@code overlays} (root panes of windows) at its place relative to it. */
 	private static BufferedImage paint(Component base, List<Component> overlays) {
+		// a plain image, not UIUtil.createImage's HiDPI one: the PNG holds exactly these pixels
+		//noinspection UndesirableClassUsage
 		BufferedImage image = new BufferedImage(base.getWidth(), base.getHeight(), BufferedImage.TYPE_INT_RGB);
 		Graphics2D g = image.createGraphics();
 		try {
@@ -109,10 +111,12 @@ final class Screenshot {
 		try {
 			MultiResolutionImage shot = new Robot().createMultiResolutionScreenCapture(bounds);
 			List<Image> variants = shot.getResolutionVariants();
-			Image largest = variants.get(variants.size() - 1);
+			Image largest = variants.getLast();
 			if (largest instanceof BufferedImage buffered) {
 				return buffered;
 			}
+			// the capture is already in device pixels; UIUtil.createImage would scale it again
+			//noinspection UndesirableClassUsage
 			BufferedImage image = new BufferedImage(largest.getWidth(null), largest.getHeight(null), BufferedImage.TYPE_INT_RGB);
 			Graphics2D g = image.createGraphics();
 			g.drawImage(largest, 0, 0, null);

@@ -39,12 +39,29 @@ intellijPlatform {
     buildSearchableOptions = false
     instrumentCode = false
     pluginConfiguration.version = project.version.toString()
-    pluginConfiguration.ideaVersion.sinceBuild = '242'
+    pluginConfiguration.ideaVersion.sinceBuild = '252'
     pluginConfiguration.ideaVersion.untilBuild = provider { null }
 
     pluginVerification.ides.create('IU', providers.gradleProperty('platformVersion'))
+    // the default minus INTERNAL_API_USAGES: IdeLog reads MessagePool, which has no public counterpart
+    pluginVerification.failureLevel = [
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.OVERRIDE_ONLY_API_USAGES,
+    ]
     if (platformLocalPath.isPresent()) {
         pluginVerification.ides.local(platformLocalPath)
+    }
+}
+
+// drives every tool once against an IDE already running the plugin, e.g. runIde; -PsmokeUrl=... for another port
+tasks.register('smokeTest', Exec) {
+    group = 'verification'
+    description = 'Runs scripts/smoke.py against a running IDE with the plugin.'
+    commandLine 'python', 'scripts/smoke.py', '--url', providers.gradleProperty('smokeUrl').getOrElse('http://127.0.0.1:63400/mcp')
+    environment 'PYTHONUTF8', '1'
+    def idePilotToken = providers.gradleProperty('idePilotToken')
+    if (idePilotToken.isPresent()) {
+        environment 'IDEPILOT_TOKEN', idePilotToken.get()
     }
 }
 

@@ -1,6 +1,7 @@
 package com.fsodomka.idepilot;
 
 import com.intellij.ide.DataManager;
+import com.intellij.openapi.actionSystem.ActionUiKind;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.Presentation;
 import com.intellij.openapi.actionSystem.Toggleable;
@@ -159,8 +160,8 @@ final class UiSnapshot {
 				list(depth, text, target, states);
 				return;
 			}
-			while (!path.isEmpty() && path.get(path.size() - 1).depth >= depth) {
-				path.remove(path.size() - 1);
+			while (!path.isEmpty() && path.getLast().depth >= depth) {
+				path.removeLast();
 			}
 			Line line = new Line(depth, text, target, states);
 			path.add(line);
@@ -192,7 +193,7 @@ final class UiSnapshot {
 				if (toon) {
 					rows.add(toonRow(depth, ref, text, states, bounds ? screenRect(target) : null));
 				} else {
-					out.append("  ".repeat(depth)).append("- ").append(text).append(" [ref=").append(ref).append(']').append(states).append(bounds ? screenBounds(target) : "").append('\n');
+					out.repeat("  ", depth).append("- ").append(text).append(" [ref=").append(ref).append(']').append(states).append(bounds ? screenBounds(target) : "").append('\n');
 				}
 			}
 		}
@@ -236,7 +237,7 @@ final class UiSnapshot {
 				out.append("- ... more: pilot_snapshot offset=").append(offset + limit).append(" next=").append(nextRef)
 						.append(find == null ? "" : " with the same find").append('\n');
 			}
-			if (out.length() == 0) {
+			if (out.isEmpty()) {
 				return offset > 0 ? "(no more lines)" : find != null ? "(no line contains \"" + find + "\")" : "(no visible windows)";
 			}
 			return out.toString();
@@ -385,7 +386,7 @@ final class UiSnapshot {
 		for (Component child : container.getComponents()) {
 			String part = rendererText(child);
 			if (!part.isEmpty()) {
-				text.append(text.length() == 0 ? "" : " ").append(part);
+				text.append(text.isEmpty() ? "" : " ").append(part);
 			}
 		}
 		return StringUtil.shortenTextWithEllipsis(text.toString(), MAX_TEXT, 0);
@@ -454,8 +455,8 @@ final class UiSnapshot {
 	private static boolean toggled(ActionButton button) {
 		Presentation presentation = button.getPresentation().clone();
 		try {
-			ActionUtil.performDumbAwareUpdate(button.getAction(), AnActionEvent.createFromDataContext("IdePilot", presentation,
-					DataManager.getInstance().getDataContext(button)), false);
+			ActionUtil.updateAction(button.getAction(), AnActionEvent.createEvent(
+					DataManager.getInstance().getDataContext(button), presentation, "IdePilot", ActionUiKind.NONE, null));
 		} catch (RuntimeException e) {
 			return Toggleable.isSelected(button.getPresentation());
 		}

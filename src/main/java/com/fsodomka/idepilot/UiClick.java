@@ -47,6 +47,7 @@ final class UiClick {
 		return mask;
 	}
 
+	@SuppressWarnings("MagicConstant") // mask combines InputEvent *_DOWN_MASK flags, from modifiers() and getMaskForButton
 	static String click(String ref, String button, int clickCount, String modifiers) {
 		int awtButton = button(button);
 		int mask = modifiers(modifiers);
