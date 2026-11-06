@@ -2,12 +2,14 @@ package com.fsodomka.idepilot;
 
 import com.intellij.ide.DataManager;
 import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionUiKind;
 import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.ide.impl.ProjectUtil;
-import com.intellij.openapi.application.ReadAction;
+import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.fileEditor.OpenFileDescriptor;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.impl.CoreProgressManager;
@@ -27,7 +29,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicReference;
 
 /** Running actions by ID, and waiting for the UI or indexing. */
 final class IdeActions {
@@ -55,7 +56,9 @@ final class IdeActions {
 		Component context = target != null ? target : KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
 		// the modality of the context's dialog: write-safe, yet runs while that dialog is open
 		ApplicationManager.getApplication().invokeLater(
-				() -> ActionUtil.invokeAction(action, DataManager.getInstance().getDataContext(context), PLACE, null, null),
+				// performAction skips update(), as invokeAction did; tryToExecute would not run ExpandAll on a collapsed tree
+				() -> ActionUtil.performAction(action, AnActionEvent.createEvent(DataManager.getInstance().getDataContext(context),
+						action.getTemplatePresentation().clone(), PLACE, ActionUiKind.NONE, null)),
 				context == null ? ModalityState.nonModal() : ModalityState.stateForComponent(context));
 		return "Ran " + id + (ref == null ? "" : " on " + ref);
 	}
@@ -86,7 +89,7 @@ final class IdeActions {
 		}
 		Project[] projects = ProjectManager.getInstance().getOpenProjects();
 		Project project = Arrays.stream(projects)
-				.filter(p -> !p.isDisposed() && ReadAction.compute(() -> ProjectFileIndex.getInstance(p).isInContent(virtualFile)))
+				.filter(p -> !p.isDisposed() && ApplicationManager.getApplication().runReadAction((Computable<Boolean>) () -> ProjectFileIndex.getInstance(p).isInContent(virtualFile)))
 				.findFirst().orElse(projects.length == 0 ? null : projects[0]);
 		if (project == null) {
 			throw new IllegalStateException("No open project to open the file in; open its project first");
@@ -145,9 +148,8 @@ final class IdeActions {
 		if (text == null) {
 			return "";
 		}
-		AtomicReference<String> ui = new AtomicReference<>();
-		ApplicationManager.getApplication().invokeAndWait(() -> ui.set(UiSnapshot.text()), ModalityState.any());
-		List<String> lines = ui.get().lines().filter(line -> line.contains(text)).map(String::strip).toList();
+		String ui = Edt.compute(UiSnapshot::text);
+		List<String> lines = ui.lines().filter(line -> line.contains(text)).map(String::strip).toList();
 		StringBuilder out = new StringBuilder();
 		for (int i = 0; i < Math.min(lines.size(), MAX_MATCHES); i++) {
 			out.append('\n').append(lines.get(i));
@@ -193,12 +195,11 @@ final class IdeActions {
 		if (text == null && gone == null) {
 			return null;
 		}
-		AtomicReference<String> ui = new AtomicReference<>();
-		ApplicationManager.getApplication().invokeAndWait(() -> ui.set(UiSnapshot.text()), ModalityState.any());
-		if (text != null && !ui.get().contains(text)) {
+		String ui = Edt.compute(UiSnapshot::text);
+		if (text != null && !ui.contains(text)) {
 			return "\"" + text + "\" not shown";
 		}
-		if (gone != null && ui.get().contains(gone)) {
+		if (gone != null && ui.contains(gone)) {
 			return "\"" + gone + "\" still shown";
 		}
 		return null;

@@ -9,8 +9,6 @@ import com.intellij.execution.ui.RunContentDescriptor;
 import com.intellij.execution.ui.RunContentManager;
 import com.intellij.notification.ActionCenter;
 import com.intellij.notification.Notification;
-import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.application.PathManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
@@ -29,8 +27,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Supplier;
 import java.util.stream.Stream;
 import java.util.ArrayList;
 import java.util.List;
@@ -134,7 +130,7 @@ final class IdeLog {
 
 	/** The notifications of the open projects and the application (the Notifications tool window), oldest first. */
 	static String notifications(int count, String contains) {
-		List<String> notifications = onUiThread(() -> {
+		List<String> notifications = Edt.compute(() -> {
 			Set<Notification> all = new LinkedHashSet<>(ActionCenter.getNotifications(null));
 			for (Project project : ProjectManager.getInstance().getOpenProjects()) {
 				all.addAll(ActionCenter.getNotifications(project));
@@ -182,7 +178,7 @@ final class IdeLog {
 
 	/** The Run/Debug consoles of the open projects. */
 	static List<Console> consoleTexts() {
-		return onUiThread(() -> {
+		return Edt.compute(() -> {
 			List<Console> result = new ArrayList<>();
 			for (Project project : ProjectManager.getInstance().getOpenProjects()) {
 				for (RunContentDescriptor descriptor : RunContentManager.getInstance(project).getAllDescriptors()) {
@@ -210,12 +206,6 @@ final class IdeLog {
 
 	private static String html(String text) {
 		return StringUtil.removeHtmlTags(text, true).replaceAll("\\s+", " ").trim();
-	}
-
-	private static <T> T onUiThread(Supplier<T> supplier) {
-		AtomicReference<T> result = new AtomicReference<>();
-		ApplicationManager.getApplication().invokeAndWait(() -> result.set(supplier.get()), ModalityState.any());
-		return result.get();
 	}
 
 	private static List<String> matching(List<String> lines, String contains) {
