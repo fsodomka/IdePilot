@@ -1,5 +1,11 @@
 /.idea/
-/.gradle/
 /.intellijPlatform/
+
+/.gradle/
 /build/
+__pycache__/
+
 /docs/
+/reviews/
+
+CLAUDE.local.md

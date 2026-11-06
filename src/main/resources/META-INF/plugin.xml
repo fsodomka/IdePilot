@@ -1,0 +1,37 @@
+<idea-plugin>
+    <id>com.fsodomka.idepilot</id>
+    <name>IDE Pilot</name>
+    <vendor>Frantisek Sodomka</vendor>
+
+    <description><![CDATA[
+    <p>Lets AI agents see and drive the IDE over MCP, the way the Playwright MCP drives a browser. For plugin
+    development and UI testing in the runIde sandbox.</p>
+    <h3>Tools</h3>
+    <ul>
+      <li><b>pilot_action</b> &ndash; runs an IDE action by ID.</li>
+      <li><b>pilot_click</b> &ndash; clicks the component or row with a ref: left, middle or right button, double-click, with modifier keys.</li>
+      <li><b>pilot_evaluate</b> &ndash; runs a Groovy script inside the IDE.</li>
+      <li><b>pilot_log</b> &ndash; the idea.log tail, the IDE's caught exceptions, recent UI freezes, notifications, stdout/stderr, or Run/Debug console text.</li>
+      <li><b>pilot_open</b> &ndash; opens a project, or a file at a line.</li>
+      <li><b>pilot_screenshot</b> &ndash; PNG of a component, or of the active window with its popups.</li>
+      <li><b>pilot_snapshot</b> &ndash; the visible UI as a text tree of windows, components and list and tree rows,
+        with role, name, state and a ref to act on; paged, optionally with screen positions.</li>
+      <li><b>pilot_type</b> &ndash; types text and presses keys; shortcuts run their actions.</li>
+      <li><b>pilot_window</b> &ndash; brings a window to the front, resizes it, or closes it.</li>
+      <li><b>pilot_wait_for</b> &ndash; waits for text to show or go, for indexing or background tasks to finish, for Run console text, or for a time.</li>
+    </ul>
+    <p>The server listens on localhost and needs a token: generate it in <b>Settings | Tools | IDE Pilot</b> and paste
+    it into the agent's MCP settings.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <applicationListeners>
+        <listener class="com.fsodomka.idepilot.PilotServer" topic="com.intellij.ide.AppLifecycleListener"/>
+    </applicationListeners>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationConfigurable parentId="tools" instance="com.fsodomka.idepilot.PilotConfigurable"
+                                 id="com.fsodomka.idepilot" displayName="IDE Pilot"/>
+    </extensions>
+</idea-plugin>
