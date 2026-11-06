@@ -1,0 +1,61 @@
+plugins {
+    id 'java'
+    id 'org.jetbrains.intellij.platform' version '2.19.0'
+}
+
+group = 'com.fsodomka.idepilot'
+version = '2026.1.0'
+
+repositories {
+    mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.compilerArgs.add("-Xlint:deprecation")
+}
+
+def platformLocalPath = providers.gradleProperty('platformLocalPath').filter { !it.isBlank() }
+
+dependencies {
+    intellijPlatform {
+        intellijIdea(providers.gradleProperty('platformVersion'))
+    }
+}
+
+intellijPlatform {
+    buildSearchableOptions = false
+    instrumentCode = false
+    pluginConfiguration.version = project.version.toString()
+    pluginConfiguration.ideaVersion.sinceBuild = '242'
+    pluginConfiguration.ideaVersion.untilBuild = provider { null }
+
+    pluginVerification.ides.create('IU', providers.gradleProperty('platformVersion'))
+    if (platformLocalPath.isPresent()) {
+        pluginVerification.ides.local(platformLocalPath)
+    }
+}
+
+tasks.withType(org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask).configureEach {
+    maxHeapSize = '4g'
+    autoReload = false
+}
+
+if (platformLocalPath.isPresent()) {
+    intellijPlatformTesting {
+        runIde {
+            register('runIdeLocal') {
+                localPath = file(platformLocalPath.get())
+            }
+        }
+    }
+}
