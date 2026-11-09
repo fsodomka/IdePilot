@@ -6,6 +6,7 @@ import javax.swing.JPanel;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -18,6 +19,21 @@ public class SnapshotPageTest {
 		for (int i = 0; i < 5; i++) {
 			targets.add(new UiSnapshot.Target(new JPanel()));
 		}
+	}
+
+	@Test
+	public void rowRange() {
+		// without allRows: the shown rows, none when none show
+		assertArrayEquals(new int[]{10, 20}, UiSnapshot.rowRange(500, 10, 20, false));
+		assertArrayEquals(new int[]{0, -1}, UiSnapshot.rowRange(500, -1, -1, false));
+		// allRows, at most 200 rows: all of them
+		assertArrayEquals(new int[]{0, 149}, UiSnapshot.rowRange(150, 100, 110, true));
+		assertArrayEquals(new int[]{0, -1}, UiSnapshot.rowRange(0, -1, -1, true));
+		// more: 200 around the shown ones, clamped to the ends
+		assertArrayEquals(new int[]{216, 415}, UiSnapshot.rowRange(500, 300, 330, true));
+		assertArrayEquals(new int[]{0, 199}, UiSnapshot.rowRange(500, 5, 20, true));
+		assertArrayEquals(new int[]{300, 499}, UiSnapshot.rowRange(500, 480, 499, true));
+		assertArrayEquals(new int[]{0, 199}, UiSnapshot.rowRange(500, -1, -1, true));
 	}
 
 	private UiSnapshot.Page page(int offset, int limit) {

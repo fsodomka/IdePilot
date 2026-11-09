@@ -9,9 +9,12 @@ import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.actionSystem.impl.ActionButton;
 import com.intellij.openapi.util.text.StringUtil;
 
+import javax.accessibility.Accessible;
+import javax.accessibility.AccessibleComponent;
 import javax.accessibility.AccessibleContext;
 import javax.accessibility.AccessibleRole;
 import javax.accessibility.AccessibleState;
+import javax.accessibility.AccessibleStateSet;
 import javax.swing.AbstractButton;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
@@ -44,6 +47,7 @@ import java.util.WeakHashMap;
 final class UiSnapshot {
 	private static final int MAX_TEXT = 80;
 	private static final int MAX_ROWS = 200;
+	private static final String COMPOSE_PANEL = "androidx.compose.ui.awt.ComposePanel";
 	/** Each component's ref, kept while the component lives. */
 	private static final Map<Component, String> ids = new WeakHashMap<>();
 	private static final Map<String, Target> refs = new HashMap<>();
@@ -58,13 +62,18 @@ final class UiSnapshot {
 			this(new WeakReference<>(component), -1, null);
 		}
 
-		/** Whether a row target's row still shows its item; true for a component. Call on the EDT. */
+		/** Whether a row target's row still shows its item (a Compose node: is still showing); true for a component. Call on the EDT. */
 		boolean rowCurrent() {
 			if (row < 0) {
 				return true;
 			}
 			Object expected = item.get();
 			Component owner = component.get();
+			if (owner != null && isCompose(owner) && expected instanceof Accessible node) {
+				AccessibleContext context = node.getAccessibleContext();
+				return context != null && context.getAccessibleStateSet() != null
+						&& context.getAccessibleStateSet().contains(AccessibleState.SHOWING);
+			}
 			Object actual = owner instanceof JList<?> list ? row < list.getModel().getSize() ? list.getModel().getElementAt(row) : null
 					: owner instanceof JTree tree && tree.getPathForRow(row) != null ? tree.getPathForRow(row).getLastPathComponent() : null;
 			return expected != null && expected.equals(actual);
@@ -79,12 +88,13 @@ final class UiSnapshot {
 	 * offset and first ref of the next page instead of counting the rest. Given that ref as {@code next}, fails when
 	 * the UI changed so that the page would not continue the previous one.
 	 */
-	static String snapshot(int offset, int limit, String next, boolean bounds, String find, boolean toon) {
+	static String snapshot(int offset, int limit, String next, boolean bounds, String find, boolean toon, boolean allRows) {
 		return Edt.compute(() -> {
 			if (offset == 0) {
 				refs.values().removeIf(target -> target.component().get() == null);
 			}
 			Page page = new Page(offset, Math.max(limit, 1), bounds, find, toon);
+			page.allRows = allRows;
 			for (Window window : Window.getWindows()) {
 				if (page.full) {
 					break;
@@ -153,6 +163,8 @@ final class UiSnapshot {
 
 		/** With toon, the page is a TOON table of lines instead of an indented tree. */
 		final boolean toon;
+		/** List every row of lists and trees (at most {@link #MAX_ROWS}), not only those that show. */
+		boolean allRows;
 		private final List<String> rows = new ArrayList<>();
 
 		void add(int depth, String text, Target target, String states) {
@@ -270,14 +282,34 @@ final class UiSnapshot {
 		if (component == null || !component.isShowing()) {
 			return null;
 		}
-		Rectangle r = target.row() < 0 ? new Rectangle(0, 0, component.getWidth(), component.getHeight())
-				: component instanceof JList<?> list ? list.getCellBounds(target.row(), target.row())
-				: component instanceof JTree tree ? tree.getRowBounds(target.row()) : null;
+		Rectangle r = target.row() < 0 ? new Rectangle(0, 0, component.getWidth(), component.getHeight()) : rowBounds(component, target);
 		if (r == null) {
 			return null;
 		}
 		Point origin = component.getLocationOnScreen();
 		return new Rectangle(origin.x + r.x, origin.y + r.y, r.width, r.height);
+	}
+
+	/**
+	 * A row target's bounds in its owner's coordinates: a list or tree row's cell, or a Compose node's bounds (which
+	 * Compose reports relative to its panel); null for a component or a row no longer shown. Call on the EDT.
+	 */
+	static Rectangle rowBounds(Component owner, Target target) {
+		if (target.row() < 0) {
+			return null;
+		}
+		if (isCompose(owner) && target.item().get() instanceof Accessible node) {
+			AccessibleContext context = node.getAccessibleContext();
+			AccessibleComponent shown = context == null ? null : context.getAccessibleComponent();
+			return shown == null ? null : shown.getBounds();
+		}
+		return owner instanceof JList<?> list ? list.getCellBounds(target.row(), target.row())
+				: owner instanceof JTree tree ? tree.getRowBounds(target.row()) : null;
+	}
+
+	/** Whether the component is a Compose for Desktop panel, whose content shows only through its accessible tree. */
+	static boolean isCompose(Component component) {
+		return component.getClass().getName().equals(COMPOSE_PANEL);
 	}
 
 	/** The component of {@code ref}, for a row its list or tree. Resolved on the EDT, which owns {@link #refs}. */
@@ -334,40 +366,136 @@ final class UiSnapshot {
 					treeRows(tree, childDepth, page);
 				}
 			}
-			if (child instanceof Container c) {
+			if (isCompose(child)) {
+				// its Swing children are only the canvas it paints on; its content is in its accessible tree
+				composeNodes(child, child.getAccessibleContext(), childDepth, page, new int[1]);
+			} else if (child instanceof Container c) {
 				children(c, childDepth, page);
 			}
 		}
 	}
 
-	@SuppressWarnings({"unchecked", "rawtypes"})
-	private static void listRows(JList list, int depth, Page page) {
-		int first = list.getFirstVisibleIndex();
-		int last = Math.min(list.getLastVisibleIndex(), first + MAX_ROWS - 1);
-		ListCellRenderer renderer = list.getCellRenderer();
-		for (int i = Math.max(first, 0); first >= 0 && i <= last && !page.full; i++) {
-			Object value = list.getModel().getElementAt(i);
-			String text = renderer == null ? String.valueOf(value)
-					: rendererText(renderer.getListCellRendererComponent(list, value, i, list.isSelectedIndex(i), false));
-			row(list, i, value, "listitem", text, list.isSelectedIndex(i) ? " (selected)" : "", depth, page);
+	/**
+	 * The showing nodes of a Compose panel's accessible tree, as rows of the panel numbered in walk order; unnamed
+	 * generic nodes are flattened into their children, as unnamed Swing containers are.
+	 */
+	private static void composeNodes(Component panel, AccessibleContext context, int depth, Page page, int[] index) {
+		if (context == null) {
+			return;
 		}
+		for (int i = 0; i < context.getAccessibleChildrenCount() && !page.full; i++) {
+			Accessible node = context.getAccessibleChild(i);
+			AccessibleContext child = node == null ? null : node.getAccessibleContext();
+			AccessibleStateSet set = child == null ? null : child.getAccessibleStateSet();
+			Rectangle bounds = child == null || child.getAccessibleComponent() == null ? null : child.getAccessibleComponent().getBounds();
+			if (child == null) {
+				continue;
+			}
+			// some containers report no states or no size, yet hold showing nodes: walk them unlisted
+			boolean showing = set != null && bounds != null && !bounds.isEmpty() && set.contains(AccessibleState.SHOWING);
+			AccessibleRole accessibleRole = child.getAccessibleRole();
+			String role = accessibleRole == null ? "unknown" : accessibleRole.toDisplayString(Locale.ENGLISH);
+			String name = clean(child.getAccessibleName());
+			int childDepth = depth;
+			if (showing && (!name.isEmpty() || child.getAccessibleChildrenCount() == 0 || !isGeneric(role))) {
+				page.add(depth, name.isEmpty() ? role : role + " " + quote(name),
+						new Target(new WeakReference<>(panel), index[0]++, new WeakReference<>(node)), states(set));
+				childDepth++;
+			}
+			composeNodes(panel, child, childDepth, page, index);
+		}
+	}
+
+	private static String states(AccessibleStateSet set) {
+		StringBuilder states = new StringBuilder();
+		if (!set.contains(AccessibleState.ENABLED)) {
+			states.append(" (disabled)");
+		}
+		if (set.contains(AccessibleState.CHECKED)) {
+			states.append(" (checked)");
+		}
+		if (set.contains(AccessibleState.SELECTED)) {
+			states.append(" (selected)");
+		}
+		if (set.contains(AccessibleState.FOCUSED)) {
+			states.append(" (focused)");
+		}
+		return states.toString();
+	}
+
+	private static void listRows(JList<?> list, int depth, Page page) {
+		int shownFirst = list.getFirstVisibleIndex(), shownLast = list.getLastVisibleIndex();
+		int count = list.getModel().getSize();
+		int[] range = rowRange(count, shownFirst, shownLast, page.allRows);
+		for (int i = range[0]; i <= range[1] && !page.full; i++) {
+			row(list, i, list.getModel().getElementAt(i), "listitem", listRowText(list, i), (list.isSelectedIndex(i) ? " (selected)" : "")
+					+ offscreen(i, shownFirst, shownLast, page.allRows) + unlisted(i, range, count, page.allRows), depth, page);
+		}
+	}
+
+	/**
+	 * The first and last row to list, 0-based (first > last for none): the shown rows, at most {@link #MAX_ROWS}; with
+	 * {@code all}, every row, or when there are more than {@link #MAX_ROWS}, that many around the shown ones.
+	 */
+	static int[] rowRange(int count, int shownFirst, int shownLast, boolean all) {
+		if (!all || count <= MAX_ROWS) {
+			return !all ? shownFirst < 0 ? new int[]{0, -1} : new int[]{shownFirst, Math.min(shownLast, shownFirst + MAX_ROWS - 1)}
+					: new int[]{0, count - 1};
+		}
+		int shown = shownFirst < 0 ? 0 : Math.min(shownLast - shownFirst + 1, MAX_ROWS);
+		int start = shownFirst < 0 ? 0 : shownFirst - (MAX_ROWS - shown) / 2;
+		int first = Math.clamp(start, 0, count - MAX_ROWS);
+		return new int[]{first, first + MAX_ROWS - 1};
+	}
+
+	/** " (offscreen)" for a row outside the shown ones, which only allRows lists. */
+	private static String offscreen(int row, int shownFirst, int shownLast, boolean all) {
+		return all && (shownFirst < 0 || row < shownFirst || row > shownLast) ? " (offscreen)" : "";
+	}
+
+	/** With allRows, on the first and last row listed, how many rows before or after them are not listed. */
+	private static String unlisted(int row, int[] range, int count, boolean all) {
+		if (!all) {
+			return "";
+		}
+		return (row == range[0] && range[0] > 0 ? " (" + range[0] + " rows above not listed)" : "")
+				+ (row == range[1] && range[1] < count - 1 ? " (" + (count - 1 - range[1]) + " rows below not listed)" : "");
+	}
+
+	/** The text a list shows in row {@code i}. Call on the EDT. */
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	static String listRowText(JList list, int i) {
+		Object value = list.getModel().getElementAt(i);
+		ListCellRenderer renderer = list.getCellRenderer();
+		return renderer == null ? String.valueOf(value)
+				: rendererText(renderer.getListCellRendererComponent(list, value, i, list.isSelectedIndex(i), false));
+	}
+
+	/** The text a tree shows in row {@code i}. Call on the EDT. */
+	static String treeRowText(JTree tree, int i) {
+		Object node = tree.getPathForRow(i).getLastPathComponent();
+		boolean leaf = tree.getModel().isLeaf(node);
+		return tree.getCellRenderer() == null ? tree.convertValueToText(node, tree.isRowSelected(i), tree.isExpanded(i), leaf, i, false)
+				: rendererText(tree.getCellRenderer().getTreeCellRendererComponent(tree, node, tree.isRowSelected(i), tree.isExpanded(i), leaf, i, false));
 	}
 
 	private static void treeRows(JTree tree, int depth, Page page) {
 		Rectangle visible = tree.getVisibleRect();
-		int first = tree.getClosestRowForLocation(visible.x, visible.y);
-		int last = Math.min(tree.getClosestRowForLocation(visible.x, visible.y + visible.height - 1), first + MAX_ROWS - 1);
+		int shownFirst = tree.getClosestRowForLocation(visible.x, visible.y);
+		int shownLast = tree.getClosestRowForLocation(visible.x, visible.y + visible.height - 1);
+		int count = tree.getRowCount();
+		int[] range = rowRange(count, shownFirst, shownLast, page.allRows);
 		int rootDepth = tree.isRootVisible() ? 1 : 2;
-		for (int i = Math.max(first, 0); first >= 0 && i <= last && !page.full; i++) {
+		for (int i = range[0]; i <= range[1] && !page.full; i++) {
 			TreePath path = tree.getPathForRow(i);
 			if (path == null) {
 				continue;
 			}
 			Object node = path.getLastPathComponent();
 			boolean leaf = tree.getModel().isLeaf(node);
-			String text = tree.getCellRenderer() == null ? tree.convertValueToText(node, tree.isRowSelected(i), tree.isExpanded(i), leaf, i, false)
-					: rendererText(tree.getCellRenderer().getTreeCellRendererComponent(tree, node, tree.isRowSelected(i), tree.isExpanded(i), leaf, i, false));
-			String states = (leaf ? "" : tree.isExpanded(i) ? " (expanded)" : " (collapsed)") + (tree.isRowSelected(i) ? " (selected)" : "");
+			String text = treeRowText(tree, i);
+			String states = (leaf ? "" : tree.isExpanded(i) ? " (expanded)" : " (collapsed)") + (tree.isRowSelected(i) ? " (selected)" : "")
+					+ offscreen(i, shownFirst, shownLast, page.allRows) + unlisted(i, range, count, page.allRows);
 			row(tree, i, node, "treeitem", text, states, depth + Math.max(path.getPathCount() - rootDepth, 0), page);
 		}
 	}
@@ -424,6 +552,11 @@ final class UiSnapshot {
 				name = text.getText();
 			}
 		}
+		return clean(name);
+	}
+
+	/** A name without HTML, on one line, shortened. */
+	private static String clean(String name) {
 		return StringUtil.shortenTextWithEllipsis(StringUtil.removeHtmlTags(StringUtil.notNullize(name), true).strip().replaceAll("\\s+", " "), MAX_TEXT, 0);
 	}
 

@@ -2,18 +2,12 @@ package com.fsodomka.idepilot;
 
 import com.intellij.diagnostic.AbstractMessage;
 import com.intellij.diagnostic.MessagePool;
-import com.intellij.execution.impl.ConsoleViewImpl;
-import com.intellij.execution.testframework.ui.BaseTestsOutputConsoleView;
-import com.intellij.execution.ui.ExecutionConsole;
-import com.intellij.execution.ui.RunContentDescriptor;
-import com.intellij.execution.ui.RunContentManager;
 import com.intellij.notification.ActionCenter;
 import com.intellij.notification.Notification;
 import com.intellij.openapi.application.PathManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.text.StringUtil;
-import com.intellij.terminal.TerminalExecutionConsole;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -32,7 +26,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/** The tail of idea.log, the IDE's caught exceptions, UI freezes, notifications, stdout/stderr and Run consoles. */
+/** The tail of idea.log, the IDE's caught exceptions, UI freezes, notifications and stdout/stderr. */
 final class IdeLog {
 	/** How far back to read; enough for the tail, filtered or not, without reading a large log whole. */
 	private static final long MAX_BYTES = 4L << 20;
@@ -135,20 +129,24 @@ final class IdeLog {
 			for (Project project : ProjectManager.getInstance().getOpenProjects()) {
 				all.addAll(ActionCenter.getNotifications(project));
 			}
-			return all.stream().sorted(Comparator.comparingLong(Notification::getTimestamp)).map(n -> {
-				StringBuilder text = new StringBuilder(TIME.format(Instant.ofEpochMilli(n.getTimestamp())))
-						.append(' ').append(n.getType()).append(" [").append(n.getGroupId()).append("] ").append(html(n.getTitle()));
-				if (n.getSubtitle() != null && !n.getSubtitle().isBlank()) {
-					text.append(" / ").append(html(n.getSubtitle()));
-				}
-				if (!n.getContent().isBlank()) {
-					text.append(": ").append(html(n.getContent()));
-				}
-				return (n.isExpired() ? "(expired) " : "") + text;
-			}).toList();
+			return all.stream().sorted(Comparator.comparingLong(Notification::getTimestamp))
+					.map(n -> (n.isExpired() ? "(expired) " : "") + notification(n)).toList();
 		});
 		List<String> last = last(matching(notifications, contains), count);
 		return last.isEmpty() ? "(no notifications)" : String.join("\n", last);
+	}
+
+	/** A notification as "HH:mm:ss TYPE [group] title / subtitle: content", without HTML. */
+	static String notification(Notification n) {
+		StringBuilder text = new StringBuilder(TIME.format(Instant.ofEpochMilli(n.getTimestamp())))
+				.append(' ').append(n.getType()).append(" [").append(n.getGroupId()).append("] ").append(html(n.getTitle()));
+		if (n.getSubtitle() != null && !n.getSubtitle().isBlank()) {
+			text.append(" / ").append(html(n.getSubtitle()));
+		}
+		if (!n.getContent().isBlank()) {
+			text.append(": ").append(html(n.getContent()));
+		}
+		return text.toString();
 	}
 
 	/** The last lines the IDE process wrote to stdout and stderr since the plugin started; stderr lines start with [err]. */
@@ -157,58 +155,13 @@ final class IdeLog {
 		return last.isEmpty() ? "(no stdout/stderr output)" : String.join("\n", last);
 	}
 
-	/** The last lines of each Run/Debug console of the open projects, under its tab's name. */
-	static String consoles(int lines, String contains) {
-		List<String> result = new ArrayList<>();
-		for (Console console : consoleTexts()) {
-			String header = "== " + console.title() + (console.running() ? " (running)" : "");
-			if (console.text() == null) {
-				result.add(header + "\n(" + console.kind() + ", not readable)");
-				continue;
-			}
-			List<String> last = last(matching(List.of(console.text().split("\r?\n")), contains), lines);
-			result.add(header + (last.isEmpty() ? "\n(no matching lines)" : "\n" + String.join("\n", last)));
-		}
-		return result.isEmpty() ? "(no Run or Debug consoles)" : String.join("\n\n", result);
-	}
-
-	/** A Run/Debug tab's console: its text, or null with the console's class name when it cannot be read. */
-	record Console(String title, boolean running, String text, String kind) {
-	}
-
-	/** The Run/Debug consoles of the open projects. */
-	static List<Console> consoleTexts() {
-		return Edt.compute(() -> {
-			List<Console> result = new ArrayList<>();
-			for (Project project : ProjectManager.getInstance().getOpenProjects()) {
-				for (RunContentDescriptor descriptor : RunContentManager.getInstance(project).getAllDescriptors()) {
-					ExecutionConsole console = descriptor.getExecutionConsole();
-					if (console instanceof BaseTestsOutputConsoleView tests) {
-						console = tests.getConsole();
-					}
-					boolean running = descriptor.getProcessHandler() != null && !descriptor.getProcessHandler().isProcessTerminated();
-					String text = null;
-					if (console instanceof ConsoleViewImpl view) {
-						view.flushDeferredText();
-						text = view.getText();
-					} else if (console instanceof TerminalExecutionConsole terminal) { // e.g. Shell Script configurations
-						text = terminal.getTerminalWidget().getText().stripTrailing();
-					}
-					result.add(new Console(descriptor.getDisplayName(), running, text,
-							console == null ? "no console" : console.getClass().getSimpleName()));
-				}
-			}
-			return result;
-		});
-	}
-
-	private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
+	static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
 
 	private static String html(String text) {
 		return StringUtil.removeHtmlTags(text, true).replaceAll("\\s+", " ").trim();
 	}
 
-	private static List<String> matching(List<String> lines, String contains) {
+	static List<String> matching(List<String> lines, String contains) {
 		if (contains == null) {
 			return lines;
 		}
@@ -216,7 +169,7 @@ final class IdeLog {
 		return lines.stream().filter(line -> line.toLowerCase(Locale.ROOT).contains(needle)).toList();
 	}
 
-	private static List<String> last(List<String> lines, int count) {
+	static List<String> last(List<String> lines, int count) {
 		return lines.subList(Math.max(0, lines.size() - Math.max(count, 1)), lines.size());
 	}
 

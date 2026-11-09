@@ -67,7 +67,7 @@ public class PilotServerTest {
 			assertEquals("object", t.getAsJsonObject("inputSchema").get("type").getAsString());
 		}
 		assertEquals(Set.of("pilot_snapshot", "pilot_click", "pilot_type", "pilot_log", "pilot_action", "pilot_open",
-				"pilot_wait_for", "pilot_evaluate", "pilot_screenshot", "pilot_window"), names);
+				"pilot_wait_for", "pilot_evaluate", "pilot_screenshot", "pilot_window", "pilot_editor", "pilot_settings", "pilot_scroll"), names);
 		JsonObject click = tools.asList().stream().map(JsonElement::getAsJsonObject)
 				.filter(t -> t.get("name").getAsString().equals("pilot_click")).findFirst().orElseThrow();
 		assertEquals("ref", click.getAsJsonObject("inputSchema").getAsJsonArray("required").get(0).getAsString());
@@ -91,6 +91,13 @@ public class PilotServerTest {
 		JsonObject result = PilotServer.dispatch("tools/call", call).getAsJsonObject();
 		assertTrue(result.get("isError").getAsBoolean());
 		assertTrue(result.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString().contains("clickCount"));
+		args.addProperty("hover", true);
+		result = PilotServer.dispatch("tools/call", call).getAsJsonObject();
+		assertTrue(result.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString().contains("hover takes only"));
+		args.remove("hover");
+		args.addProperty("to", "e2");
+		result = PilotServer.dispatch("tools/call", call).getAsJsonObject();
+		assertTrue(result.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString().contains("does not take clickCount"));
 	}
 
 	@Test
@@ -120,7 +127,24 @@ public class PilotServerTest {
 
 		JsonObject empty = call("pilot_type", new JsonObject());
 		assertTrue(empty.get("isError").getAsBoolean());
-		assertEquals("Give text, key or both", text(empty));
+		assertEquals("Give text, key, clear, hold, release or a combination", text(empty));
+	}
+
+	@Test
+	public void actionTakesIdOrFind() {
+		JsonObject neither = call("pilot_action", new JsonObject());
+		assertTrue(neither.get("isError").getAsBoolean());
+		assertTrue(text(neither), text(neither).startsWith("Give id to run an action, or find"));
+		JsonObject both = new JsonObject();
+		both.addProperty("id", "Back");
+		both.addProperty("find", "back");
+		assertTrue(call("pilot_action", both).get("isError").getAsBoolean());
+		JsonObject negative = new JsonObject();
+		negative.addProperty("find", "back");
+		negative.addProperty("limit", -1);
+		JsonObject result = call("pilot_action", negative);
+		assertTrue(result.get("isError").getAsBoolean());
+		assertEquals("limit must be at least 1", text(result));
 	}
 
 	private static JsonObject call(String name, JsonObject arguments) {

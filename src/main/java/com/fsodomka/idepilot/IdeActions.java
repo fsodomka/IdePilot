@@ -1,7 +1,14 @@
 package com.fsodomka.idepilot;
 
 import com.intellij.ide.DataManager;
+import com.intellij.notification.Notification;
+import com.intellij.notification.Notifications;
+import com.intellij.openapi.Disposable;
+import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.wm.IdeFocusManager;
+import com.intellij.openapi.wm.IdeFrame;
 import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.keymap.KeymapUtil;
 import com.intellij.openapi.actionSystem.ActionUiKind;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
@@ -20,15 +27,22 @@ import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.startup.StartupManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
+import org.jetbrains.annotations.NotNull;
 
 import java.awt.Component;
 import java.awt.KeyboardFocusManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /** Running actions by ID, and waiting for the UI or indexing. */
 final class IdeActions {
@@ -41,8 +55,79 @@ final class IdeActions {
 	private IdeActions() {
 	}
 
-	/** Runs action {@code id} in the context of {@code ref}, or of the focused component. */
-	static String run(String id, String ref) {
+	/**
+	 * Runs action {@code id} in the context of {@code ref}, or of the focused component, then watches the UI for
+	 * {@code wait} seconds: returns the snapshot lines that showed meanwhile (hints, popups, dialogs; those gone again
+	 * marked so) and the notifications fired.
+	 */
+	static String run(String id, String ref, double wait) throws InterruptedException {
+		if (wait <= 0) {
+			return start(id, ref, new AtomicBoolean());
+		}
+		Set<String> before = Edt.compute(UiSnapshot::text).lines().map(String::strip).collect(Collectors.toSet());
+		List<String> notified = new CopyOnWriteArrayList<>();
+		Disposable listening = Disposer.newDisposable();
+		try {
+			Notifications listener = new Notifications() {
+				@Override
+				public void notify(@NotNull Notification notification) {
+					notified.add(IdeLog.notification(notification));
+				}
+			};
+			// the topic does not broadcast between the application and the projects
+			ApplicationManager.getApplication().getMessageBus().connect(listening).subscribe(Notifications.TOPIC, listener);
+			for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+				project.getMessageBus().connect(listening).subscribe(Notifications.TOPIC, listener);
+			}
+			AtomicBoolean ran = new AtomicBoolean();
+			String result = start(id, ref, ran);
+			// each line that showed since, and whether it still shows; polled, so hints that show briefly are caught
+			Map<String, Boolean> shown = new LinkedHashMap<>();
+			long end = System.nanoTime() + (long) (wait * 1e9);
+			for (long now = System.nanoTime(); now < end; now = System.nanoTime()) {
+				Thread.sleep(Math.min(OUTCOME_POLL_MILLIS, Math.max(1, (end - now) / 1_000_000)));
+				List<String> lines = Edt.compute(UiSnapshot::text).lines().filter(line -> !before.contains(line.strip())).toList();
+				shown.replaceAll((line, showing) -> false);
+				lines.forEach(line -> shown.put(line, true));
+			}
+			return result + outcome(ran.get(), wait, shown, notified);
+		} finally {
+			Disposer.dispose(listening);
+		}
+	}
+
+	private static final long OUTCOME_POLL_MILLIS = 200;
+	private static final int MAX_OUTCOME_LINES = 30;
+
+	/** What {@link #run} saw after the action. */
+	private static String outcome(boolean ran, double wait, Map<String, Boolean> shown, List<String> notified) {
+		String seconds = String.format(Locale.ROOT, "%.1f s", wait);
+		StringBuilder out = new StringBuilder();
+		if (!ran) {
+			out.append("; it has not run within ").append(seconds).append(" (a modal dialog may block it)");
+		}
+		if (shown.isEmpty() && notified.isEmpty()) {
+			return out.append(ran ? "; nothing new showed within " + seconds : "").toString();
+		}
+		if (!shown.isEmpty()) {
+			out.append("\nShowed within ").append(seconds).append(':');
+			int listed = 0;
+			for (Map.Entry<String, Boolean> line : shown.entrySet()) {
+				if (listed++ == MAX_OUTCOME_LINES) {
+					out.append("\n- ... ").append(shown.size() - MAX_OUTCOME_LINES).append(" more; pilot_snapshot");
+					break;
+				}
+				out.append('\n').append(line.getKey()).append(line.getValue() ? "" : " (gone)");
+			}
+		}
+		if (!notified.isEmpty()) {
+			out.append("\nNotifications:\n").append(String.join("\n", notified));
+		}
+		return out.toString();
+	}
+
+	/** Queues action {@code id} in the context of {@code ref}, or of the focused component; sets {@code ran} as it starts. */
+	private static String start(String id, String ref, AtomicBoolean ran) {
 		ActionManager manager = ActionManager.getInstance();
 		AnAction action = manager.getAction(id);
 		if (action == null) {
@@ -57,10 +142,43 @@ final class IdeActions {
 		// the modality of the context's dialog: write-safe, yet runs while that dialog is open
 		ApplicationManager.getApplication().invokeLater(
 				// performAction skips update(), as invokeAction did; tryToExecute would not run ExpandAll on a collapsed tree
-				() -> ActionUtil.performAction(action, AnActionEvent.createEvent(DataManager.getInstance().getDataContext(context),
-						action.getTemplatePresentation().clone(), PLACE, ActionUiKind.NONE, null)),
-				context == null ? ModalityState.nonModal() : ModalityState.stateForComponent(context));
+				() -> {
+					ran.set(true);
+					// with no focus owner (the IDE is not the active application), the last focused project frame, so
+					// actions such as Hotswap find their project
+					IdeFrame frame = context == null ? IdeFocusManager.getGlobalInstance().getLastFocusedFrame() : null;
+					Component data = frame != null ? frame.getComponent() : context;
+					ActionUtil.performAction(action, AnActionEvent.createEvent(DataManager.getInstance().getDataContext(data),
+							action.getTemplatePresentation().clone(), PLACE, ActionUiKind.NONE, null));
+				},
+				Edt.modality(context));
 		return "Ran " + id + (ref == null ? "" : " on " + ref);
+	}
+
+	/**
+	 * The actions whose ID or menu text contains {@code find} (case-insensitive), as "ID – text – shortcut" lines,
+	 * sorted by ID, at most {@code limit}; groups are marked.
+	 */
+	static String find(String find, int limit) {
+		ActionManager manager = ActionManager.getInstance();
+		String needle = find.toLowerCase(Locale.ROOT);
+		List<String> lines = new ArrayList<>();
+		for (String id : manager.getActionIdList("").stream().sorted().toList()) {
+			// the stub, not getAction: its text comes from plugin.xml, without loading the action's class
+			AnAction action = manager.getActionOrStub(id);
+			String text = action == null ? null : action.getTemplatePresentation().getText();
+			if (!id.toLowerCase(Locale.ROOT).contains(needle) && (text == null || !text.toLowerCase(Locale.ROOT).contains(needle))) {
+				continue;
+			}
+			String shortcut = KeymapUtil.getFirstKeyboardShortcutText(id);
+			lines.add(id + (text == null || text.isBlank() ? "" : " – " + text) + (shortcut.isEmpty() ? "" : " – " + shortcut)
+					+ (manager.isGroup(id) ? " (group)" : ""));
+		}
+		if (lines.isEmpty()) {
+			return "(no action ID or text contains \"" + find + "\")";
+		}
+		String more = lines.size() > limit ? "\n... " + (lines.size() - limit) + " more; narrow find" : "";
+		return String.join("\n", lines.subList(0, Math.min(lines.size(), limit))) + more;
 	}
 
 	/**
@@ -99,29 +217,44 @@ final class IdeActions {
 		return "Opening " + file + (line == null ? "" : ":" + line) + " in " + project.getName();
 	}
 
-	/** What pilot_wait_for waits for; null or false parts are not awaited. */
-	record Wait(String text, String gone, boolean smart, boolean idle, String console, double time) {
+	/**
+	 * What pilot_wait_for waits for; null or false parts are not awaited. {@code session} limits {@code console} to
+	 * the Run/Debug tabs whose name contains it.
+	 */
+	record Wait(String text, String gone, boolean smart, boolean idle, String console, String session, double time) {
 	}
 
 	/**
 	 * Waits until {@code time} seconds have passed and all of: {@code text} shows in the UI, {@code gone} no longer
 	 * shows, with {@code smart} no open project is indexing, with {@code idle} no background task runs, and
-	 * {@code console} shows in a Run/Debug console; fails after {@code seconds}. On success, lists the snapshot lines
-	 * that contain {@code text}, with their refs.
+	 * {@code console} shows in a Run/Debug console's output since the last pilot call that acted ({@link RunConsoles#markConsoles});
+	 * fails after {@code seconds}. On success, lists the snapshot lines that contain {@code text}, with their refs.
 	 */
 	static String waitFor(Wait wait, double seconds) throws InterruptedException {
 		if (wait.text() == null && wait.gone() == null && !wait.smart() && !wait.idle() && wait.console() == null && wait.time() <= 0) {
 			throw new IllegalArgumentException("Give text, gone, smart, idle, console or time");
 		}
+		if (wait.session() != null && wait.console() == null) {
+			throw new IllegalArgumentException("session limits console; give console too");
+		}
+		if (wait.time() > MAX_SECONDS) {
+			throw new IllegalArgumentException("time (" + wait.time() + " s) is past the most a call can wait (" + MAX_SECONDS
+					+ " s; MCP clients give up on a call after 60 s); wait in several calls");
+		}
+		// a longer call would fail in the client with its own timeout, losing what was still missing
+		String capped = seconds > MAX_SECONDS ? " (timeout capped from " + seconds + " s, as MCP clients give up on a call after 60 s; "
+				+ "call again to keep waiting)" : "";
+		seconds = Math.min(seconds, MAX_SECONDS);
 		if (wait.time() > seconds) {
 			throw new IllegalArgumentException("time (" + wait.time() + " s) is past the timeout (" + seconds + " s)");
 		}
+		Map<Object, RunConsoles.Mark> marks = wait.console() == null ? null : RunConsoles.consoleMarks();
 		long start = System.nanoTime();
 		long deadline = start + (long) (seconds * 1e9);
 		long minimum = start + (long) (wait.time() * 1e9);
 		long metSince = -1;
 		while (true) {
-			String missing = missing(wait);
+			String missing = missing(wait, marks);
 			long now = System.nanoTime();
 			if (missing == null) {
 				if (metSince < 0) {
@@ -136,7 +269,7 @@ final class IdeActions {
 				metSince = -1;
 			}
 			if (now > deadline) {
-				throw new IllegalStateException("Timed out after " + seconds + " s: " + missing);
+				throw new IllegalStateException("Timed out after " + seconds + " s" + capped + ": " + missing);
 			}
 			// poll every 200 ms, but end a plain time wait on time
 			Thread.sleep(missing == null && now < minimum ? Math.min(200, Math.max(1, (minimum - now) / 1_000_000)) : 200);
@@ -161,9 +294,11 @@ final class IdeActions {
 	}
 
 	private static final int MAX_MATCHES = 5;
+	/** The most a call waits: MCP clients (the TypeScript SDK's default) give up on a request after 60 s. */
+	static final double MAX_SECONDS = 50;
 
-	/** What is still awaited, or null when nothing is. */
-	private static String missing(Wait wait) {
+	/** What is still awaited, or null when nothing is; {@code marks} are where the consoles' old output ends. */
+	private static String missing(Wait wait, Map<Object, RunConsoles.Mark> marks) {
 		String text = wait.text();
 		String gone = wait.gone();
 		boolean smart = wait.smart();
@@ -175,8 +310,10 @@ final class IdeActions {
 				}
 			}
 		}
-		if (wait.console() != null && IdeLog.consoleTexts().stream().noneMatch(c -> c.text() != null && c.text().contains(wait.console()))) {
-			return "\"" + wait.console() + "\" not in a Run console";
+		if (wait.console() != null && RunConsoles.consoleTexts(false).stream().noneMatch(c -> c.isIn(wait.session()) && c.text() != null
+				&& RunConsoles.since(c.text(), marks.get(c.descriptor())).contains(wait.console()))) {
+			return "\"" + wait.console() + "\" not in new output of a Run console"
+					+ (wait.session() == null ? "" : " named like \"" + wait.session() + "\"");
 		}
 		if (smart) {
 			Path pending = opening.stream().findFirst().orElse(null);
