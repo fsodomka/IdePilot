@@ -73,6 +73,11 @@ tasks.withType(org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask).configur
     if (idePilotToken.isPresent()) {
         jvmArgs("-Didepilot.token=${idePilotToken.get()}")
     }
+    // the MCP port, e.g. -PidePilotPort=63401 when another IDE holds the default
+    def idePilotPort = providers.gradleProperty('idePilotPort')
+    if (idePilotPort.isPresent()) {
+        jvmArgs("-Didepilot.port=${idePilotPort.get()}")
+    }
 }
 
 if (platformLocalPath.isPresent()) {

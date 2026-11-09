@@ -4,8 +4,8 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.util.SystemInfo;
 
-import javax.swing.JList;
-import javax.swing.JTree;
+import javax.swing.JComponent;
+import javax.swing.SwingUtilities;
 import java.awt.Component;
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -13,9 +13,15 @@ import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /** Clicks on snapshot refs, as mouse events dispatched to the component (or the row's cell). */
 final class UiClick {
+	private static final long CLICK_WAIT_MILLIS = 1000;
+
 	private UiClick() {
 	}
 
@@ -50,7 +56,7 @@ final class UiClick {
 	@SuppressWarnings("MagicConstant") // mask combines InputEvent *_DOWN_MASK flags, from modifiers() and getMaskForButton
 	static String click(String ref, String button, int clickCount, String modifiers) {
 		int awtButton = button(button);
-		int mask = modifiers(modifiers);
+		int mask = modifiers(modifiers) | UiInput.held();
 		if (clickCount < 1 || clickCount > 3) {
 			throw new IllegalArgumentException("clickCount must be 1 to 3");
 		}
@@ -60,28 +66,129 @@ final class UiClick {
 		Map.Entry<Component, UiSnapshot.Target> resolved = UiSnapshot.resolveRow(ref);
 		Component component = resolved.getKey();
 		UiSnapshot.Target target = resolved.getValue();
+		CompletableFuture<Void> handled = new CompletableFuture<>();
 		// later, not and-wait: the click may open a modal dialog, which would block this request
 		ApplicationManager.getApplication().invokeLater(() -> {
-			if (!component.isShowing()) {
-				return;
-			}
-			Rectangle cell = target.row() < 0 ? null
-					: component instanceof JList<?> list ? list.getCellBounds(target.row(), target.row())
-					: component instanceof JTree tree ? tree.getRowBounds(target.row()) : null;
-			if (target.row() >= 0 && cell == null) {
-				return;
-			}
-			Point p = cell == null ? new Point(component.getWidth() / 2, component.getHeight() / 2)
-					: new Point((int) cell.getCenterX(), (int) cell.getCenterY());
-			long now = System.currentTimeMillis();
-			component.dispatchEvent(new MouseEvent(component, MouseEvent.MOUSE_ENTERED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
-			for (int n = 1; n <= clickCount; n++) {
-				component.dispatchEvent(new MouseEvent(component, MouseEvent.MOUSE_PRESSED, now, mask | InputEvent.getMaskForButton(awtButton),
-						p.x, p.y, n, popupOnPress, awtButton));
-				component.dispatchEvent(new MouseEvent(component, MouseEvent.MOUSE_RELEASED, now, mask, p.x, p.y, n, popupOnRelease, awtButton));
-				component.dispatchEvent(new MouseEvent(component, MouseEvent.MOUSE_CLICKED, now, mask, p.x, p.y, n, false, awtButton));
+			try {
+				Map.Entry<Component, Point> hit = hit(component, target);
+				if (hit == null) {
+					return;
+				}
+				Component c = hit.getKey();
+				Point p = hit.getValue();
+				long now = System.currentTimeMillis();
+				c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_ENTERED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
+				for (int n = 1; n <= clickCount; n++) {
+					c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_PRESSED, now, mask | InputEvent.getMaskForButton(awtButton),
+							p.x, p.y, n, popupOnPress, awtButton));
+					c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_RELEASED, now, mask, p.x, p.y, n, popupOnRelease, awtButton));
+					c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_CLICKED, now, mask, p.x, p.y, n, false, awtButton));
+				}
+			} finally {
+				handled.complete(null);
 			}
 		}, ModalityState.stateForComponent(component)); // its dialog's modality: write-safe, yet runs while that dialog is open
-		return "Clicked " + ref;
+		// wait for the click's handlers, so a snapshot right after sees what they opened; a modal dialog keeps
+		// them running until it closes, so stop waiting after a second
+		try {
+			handled.get(CLICK_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+		} catch (TimeoutException e) {
+			return "Clicked " + ref + "; still handling it after " + CLICK_WAIT_MILLIS + " ms (a modal dialog may be open)" + UiInput.heldNote();
+		} catch (ExecutionException ignored) {
+			// the handlers' exception is the IDE's to report
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+		return "Clicked " + ref + UiInput.heldNote();
+	}
+
+	/** Moves the mouse onto a ref (entered, then moved), so tooltips, hover popups and Quick Documentation show. */
+	@SuppressWarnings("MagicConstant") // mask combines InputEvent *_DOWN_MASK flags from modifiers()
+	static String hover(String ref, String modifiers) {
+		int mask = modifiers(modifiers) | UiInput.held();
+		Map.Entry<Component, UiSnapshot.Target> resolved = UiSnapshot.resolveRow(ref);
+		Component component = resolved.getKey();
+		ApplicationManager.getApplication().invokeLater(() -> {
+			Map.Entry<Component, Point> hit = hit(component, resolved.getValue());
+			if (hit == null) {
+				return;
+			}
+			Component c = hit.getKey();
+			Point p = hit.getValue();
+			long now = System.currentTimeMillis();
+			c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_ENTERED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
+			c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_MOVED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
+		}, ModalityState.stateForComponent(component));
+		return "Hovered " + ref + UiInput.heldNote();
+	}
+
+	/**
+	 * Drags from one ref to another: press on the source, drag events in steps, release over the target. As with a
+	 * real mouse grab, every event goes to the source, in its coordinates. Covers the IDE's own mouse-listener drags
+	 * (tool window buttons, editor tabs, splitters); drags that use AWT drag and drop run a native loop these events
+	 * cannot reach.
+	 */
+	@SuppressWarnings("MagicConstant") // mask combines InputEvent *_DOWN_MASK flags, from modifiers() and getMaskForButton
+	static String drag(String ref, String to, String button, String modifiers) {
+		int awtButton = button(button);
+		int mask = modifiers(modifiers) | UiInput.held();
+		Map.Entry<Component, UiSnapshot.Target> from = UiSnapshot.resolveRow(ref);
+		Map.Entry<Component, UiSnapshot.Target> onto = UiSnapshot.resolveRow(to);
+		Component source = from.getKey();
+		ApplicationManager.getApplication().invokeLater(() -> {
+			Map.Entry<Component, Point> hit = hit(source, from.getValue());
+			Point end = center(onto.getKey(), onto.getValue());
+			if (hit == null || end == null) {
+				return;
+			}
+			Component grab = hit.getKey();
+			Point start = hit.getValue();
+			end = SwingUtilities.convertPoint(onto.getKey(), end, grab);
+			int held = mask | InputEvent.getMaskForButton(awtButton);
+			long now = System.currentTimeMillis();
+			grab.dispatchEvent(new MouseEvent(grab, MouseEvent.MOUSE_ENTERED, now, mask, start.x, start.y, 0, false, MouseEvent.NOBUTTON));
+			grab.dispatchEvent(new MouseEvent(grab, MouseEvent.MOUSE_PRESSED, now, held, start.x, start.y, 1, false, awtButton));
+			for (int step = 1; step <= DRAG_STEPS; step++) {
+				int x = start.x + (end.x - start.x) * step / DRAG_STEPS;
+				int y = start.y + (end.y - start.y) * step / DRAG_STEPS;
+				grab.dispatchEvent(new MouseEvent(grab, MouseEvent.MOUSE_DRAGGED, now + step, held, x, y, 0, false, MouseEvent.NOBUTTON));
+			}
+			grab.dispatchEvent(new MouseEvent(grab, MouseEvent.MOUSE_RELEASED, now + DRAG_STEPS, mask, end.x, end.y, 1, false, awtButton));
+		}, ModalityState.stateForComponent(source));
+		return "Dragged " + ref + " to " + to + UiInput.heldNote();
+	}
+
+	private static final int DRAG_STEPS = 10;
+
+	/** The component and point mouse events at the ref's center go to; null if it is no longer showing. Call on the EDT. */
+	private static Map.Entry<Component, Point> hit(Component component, UiSnapshot.Target target) {
+		Point at = center(component, target);
+		return at == null ? null : under(component, at);
+	}
+
+	/** The center of the ref's row cell, or of the component; null if it is no longer showing. Call on the EDT. */
+	private static Point center(Component component, UiSnapshot.Target target) {
+		if (!component.isShowing()) {
+			return null;
+		}
+		Rectangle cell = UiSnapshot.rowBounds(component, target);
+		if (cell != null && component instanceof JComponent owner && !owner.getVisibleRect().contains(cell)) {
+			owner.scrollRectToVisible(cell); // an offscreen row from a snapshot with allRows; its bounds stay put
+		}
+		if (target.row() >= 0 && cell == null) {
+			return null;
+		}
+		return cell == null ? new Point(component.getWidth() / 2, component.getHeight() / 2)
+				: new Point((int) cell.getCenterX(), (int) cell.getCenterY());
+	}
+
+	/**
+	 * Where mouse events at {@code p} (in {@code owner}'s coordinates) go: for a Compose panel the canvas child under
+	 * the point, which has the mouse listeners, with the point in its coordinates; otherwise the owner itself.
+	 */
+	private static Map.Entry<Component, Point> under(Component owner, Point p) {
+		Component deepest = UiSnapshot.isCompose(owner) ? SwingUtilities.getDeepestComponentAt(owner, p.x, p.y) : null;
+		return deepest == null || deepest == owner ? Map.entry(owner, p)
+				: Map.entry(deepest, SwingUtilities.convertPoint(owner, p, deepest));
 	}
 }
