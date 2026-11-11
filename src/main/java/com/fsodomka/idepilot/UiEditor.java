@@ -2,21 +2,23 @@ package com.fsodomka.idepilot;
 
 import com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerEx;
 import com.intellij.codeInsight.daemon.impl.HighlightInfo;
+import com.intellij.codeInsight.daemon.impl.HighlightInfo.IntentionActionDescriptor;
 import com.intellij.codeInsight.daemon.impl.ShowIntentionsPass;
-import com.intellij.codeInsight.intention.impl.ShowIntentionActionsHandler;
 import com.intellij.codeInsight.intention.IntentionAction;
+import com.intellij.codeInsight.intention.impl.ShowIntentionActionsHandler;
 import com.intellij.lang.annotation.HighlightSeverity;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
-import com.intellij.openapi.editor.LogicalPosition;
 import com.intellij.openapi.editor.ScrollType;
 import com.intellij.openapi.editor.SelectionModel;
 import com.intellij.openapi.editor.impl.EditorComponentImpl;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Computable;
+import com.intellij.openapi.util.TextRange;
+import com.intellij.openapi.wm.IdeFocusManager;
 import com.intellij.psi.PsiDocumentManager;
 import com.intellij.psi.PsiFile;
 
@@ -39,7 +41,7 @@ final class UiEditor {
 	private UiEditor() {
 	}
 
-	record Request(String ref, String lines, String caret, boolean problems, boolean actions, String apply) {
+	record Request(String ref, String lines, String caret, String select, boolean problems, boolean actions, String apply) {
 	}
 
 	static String editor(Request request) {
@@ -63,20 +65,37 @@ final class UiEditor {
 		}
 		Project project = editor.getProject();
 		Document document = editor.getDocument();
-		if (request.caret() != null) {
-			int[] at = position(request.caret(), document.getLineCount());
+		if (request.caret() != null && request.select() != null) {
+			throw new IllegalArgumentException("Give caret or select, not both");
+		}
+		if (request.caret() != null || request.select() != null) {
 			editor.getCaretModel().removeSecondaryCarets();
-			editor.getCaretModel().moveToLogicalPosition(new LogicalPosition(at[0], at[1]));
-			editor.getSelectionModel().removeSelection();
+			if (request.caret() != null) {
+				editor.getCaretModel().moveToOffset(offset(document, position(request.caret(), document.getLineCount(), "caret")));
+				editor.getSelectionModel().removeSelection();
+			} else {
+				int[] range = selection(document, request.select());
+				// the caret goes to TO, so that a range given backwards is selected backwards, as with Shift+Up
+				editor.getCaretModel().moveToOffset(range[1]);
+				editor.getCaretModel().getPrimaryCaret().setSelection(Math.min(range[0], range[1]), Math.max(range[0], range[1]));
+			}
 			editor.getScrollingModel().scrollToCaret(ScrollType.CENTER);
+			// as clicking there would: actions run without a ref (pilot_action, pilot_type keys) then act at this caret,
+			// not on the focused tool window's selection
+			IdeFocusManager.getGlobalInstance().requestFocus(editor.getContentComponent(), true);
 		}
 		PsiFile file = project == null ? null : PsiDocumentManager.getInstance(project).getPsiFile(document);
 		StringBuilder out = new StringBuilder(header(editor, file));
 		if (request.apply() != null) {
-			IntentionAction action = find(actions(editor, file), request.apply());
+			IntentionActionDescriptor descriptor = find(actions(editor, file), request.apply());
+			IntentionAction action = descriptor.getAction();
+			// the Alt+Enter list also offers the fixes of a problem elsewhere on the caret's line; like its popup, apply
+			// those at the problem, not at the caret (Insert ';' would go to the caret)
+			TextRange range = descriptor.getFixRange();
+			int fixOffset = range != null && !range.containsOffset(editor.getCaretModel().getOffset()) ? range.getStartOffset() : -1;
 			// later: the action may open a dialog or popup (rename, choose), which would block this request
 			ApplicationManager.getApplication().invokeLater(
-					() -> ShowIntentionActionsHandler.chooseActionAndInvoke(file, editor, action, action.getText()),
+					() -> ShowIntentionActionsHandler.chooseActionAndInvoke(file, editor, action, action.getText(), fixOffset),
 					Edt.modality(editor.getContentComponent()));
 			return out.append("\nApplying ").append(action.getText()).append("; it may open a dialog or popup").toString();
 		}
@@ -87,9 +106,9 @@ final class UiEditor {
 			problems(out, project, file, document);
 		}
 		if (request.actions()) {
-			Map<String, List<IntentionAction>> groups = actions(editor, file);
+			Map<String, List<IntentionActionDescriptor>> groups = actions(editor, file);
 			out.append("\nactions at the caret:");
-			groups.forEach((group, list) -> list.forEach(a -> out.append("\n  ").append(a.getText()).append(" (").append(group).append(')')));
+			groups.forEach((group, list) -> list.forEach(a -> out.append("\n  ").append(a.getAction().getText()).append(" (").append(group).append(')')));
 			if (groups.values().stream().allMatch(List::isEmpty)) {
 				out.append(" (none)");
 			}
@@ -104,10 +123,9 @@ final class UiEditor {
 
 	private static String header(Editor editor, PsiFile file) {
 		Document document = editor.getDocument();
-		LogicalPosition caret = editor.getCaretModel().getLogicalPosition();
 		StringBuilder header = new StringBuilder(file != null ? file.getName() : "(no file)")
 				.append(" – ").append(document.getLineCount()).append(" lines, caret ")
-				.append(caret.line + 1).append(':').append(caret.column + 1);
+				.append(at(document, editor.getCaretModel().getOffset()));
 		SelectionModel selection = editor.getSelectionModel();
 		if (selection.hasSelection()) {
 			header.append(", selection ").append(at(document, selection.getSelectionStart())).append('-')
@@ -153,34 +171,36 @@ final class UiEditor {
 	}
 
 	/** The Alt+Enter actions at the caret, by kind, as the IDE would show them. */
-	private static Map<String, List<IntentionAction>> actions(Editor editor, PsiFile file) {
+	private static Map<String, List<IntentionActionDescriptor>> actions(Editor editor, PsiFile file) {
 		if (file == null) {
 			throw new IllegalArgumentException("The editor has no file, so no actions");
 		}
 		ShowIntentionsPass.IntentionsInfo info = ProgressManager.getInstance().runProcessWithProgressSynchronously(
 				() -> ApplicationManager.getApplication().runReadAction((Computable<ShowIntentionsPass.IntentionsInfo>) () -> ShowIntentionsPass.getActionsToShow(editor, file)),
 				"Collecting Actions", true, file.getProject());
-		Map<String, List<IntentionAction>> groups = new LinkedHashMap<>();
-		groups.put("error fix", info.errorFixesToShow.stream().map(HighlightInfo.IntentionActionDescriptor::getAction).toList());
-		groups.put("inspection fix", info.inspectionFixesToShow.stream().map(HighlightInfo.IntentionActionDescriptor::getAction).toList());
-		groups.put("intention", info.intentionsToShow.stream().map(HighlightInfo.IntentionActionDescriptor::getAction).toList());
+		Map<String, List<IntentionActionDescriptor>> groups = new LinkedHashMap<>();
+		groups.put("error fix", List.copyOf(info.errorFixesToShow));
+		groups.put("inspection fix", List.copyOf(info.inspectionFixesToShow));
+		groups.put("intention", List.copyOf(info.intentionsToShow));
 		return groups;
 	}
 
 	/** The action with exactly this text, else the only one equal ignoring case; else fails listing them. */
-	private static IntentionAction find(Map<String, List<IntentionAction>> groups, String text) {
-		List<IntentionAction> all = groups.values().stream().flatMap(List::stream).toList();
-		for (IntentionAction action : all) {
-			if (action.getText().equals(text)) {
-				return action;
+	private static IntentionActionDescriptor find(Map<String, List<IntentionActionDescriptor>> groups,
+			String text) {
+		List<IntentionActionDescriptor> all = groups.values().stream().flatMap(List::stream).toList();
+		for (IntentionActionDescriptor descriptor : all) {
+			if (descriptor.getAction().getText().equals(text)) {
+				return descriptor;
 			}
 		}
-		List<IntentionAction> loose = all.stream().filter(a -> a.getText().equalsIgnoreCase(text.trim())).toList();
+		List<IntentionActionDescriptor> loose = all.stream()
+				.filter(d -> d.getAction().getText().equalsIgnoreCase(text.trim())).toList();
 		if (loose.size() == 1) {
 			return loose.getFirst();
 		}
 		throw new IllegalArgumentException("No action " + text + " at the caret; actions: "
-				+ (all.isEmpty() ? "(none)" : String.join(", ", all.stream().map(IntentionAction::getText).toList())));
+				+ (all.isEmpty() ? "(none)" : String.join(", ", all.stream().map(d -> d.getAction().getText()).toList())));
 	}
 
 	/** The 1-based first and last line to show from "N" or "N-M" (null: all), the last clipped to the document's. */
@@ -203,16 +223,49 @@ final class UiEditor {
 
 	/** 0-based line and column from "LINE" or "LINE:COLUMN" (1-based). */
 	static int[] position(String text, int lineCount) {
+		return position(text, lineCount, "caret");
+	}
+
+	/** {@link #position(String, int)}, naming the argument {@code name} in its errors. */
+	static int[] position(String text, int lineCount, String name) {
 		Matcher m = POSITION.matcher(text);
 		if (!m.matches()) {
-			throw new IllegalArgumentException("caret must be LINE or LINE:COLUMN, e.g. 12:5");
+			throw new IllegalArgumentException(name + " must be LINE or LINE:COLUMN, e.g. 12:5");
 		}
 		int line = Integer.parseInt(m.group(1));
 		int column = m.group(2) == null ? 1 : Integer.parseInt(m.group(2));
 		if (line < 1 || line > Math.max(lineCount, 1) || column < 1) {
-			throw new IllegalArgumentException("caret " + text + " outside lines 1-" + Math.max(lineCount, 1));
+			throw new IllegalArgumentException(name + " " + text + " outside lines 1-" + Math.max(lineCount, 1));
 		}
 		return new int[]{line - 1, column - 1};
+	}
+
+	/**
+	 * The offsets of FROM and TO in "FROM-TO", each LINE or LINE:COLUMN (1-based, TO exclusive, as the header gives a
+	 * selection); a column past the end of its line is its end.
+	 */
+	static int[] selection(Document document, String text) {
+		String[] ends = text.split("-", -1);
+		if (ends.length != 2) {
+			throw new IllegalArgumentException("select must be FROM-TO, each LINE or LINE:COLUMN, e.g. 10:5-12:20");
+		}
+		int lineCount = document.getLineCount();
+		// TO may be the line after the last, the end of the text, so that N-M selects through the last line too
+		int[] to = position(ends[1], lineCount + 1, "select");
+		return new int[]{offset(document, position(ends[0], lineCount, "select")),
+				to[0] >= lineCount ? document.getTextLength() : offset(document, to)};
+	}
+
+	/**
+	 * The offset of a 0-based line and column, the column counted in characters (a tab is one, as problems give
+	 * them), not in the editor's columns; a column past the end of its line is its end.
+	 */
+	private static int offset(Document document, int[] position) {
+		if (document.getLineCount() == 0) {
+			return 0;
+		}
+		int start = document.getLineStartOffset(position[0]);
+		return start + Math.min(position[1], document.getLineEndOffset(position[0]) - start);
 	}
 
 	/** LINE:COLUMN, 1-based, of an offset. */

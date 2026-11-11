@@ -98,6 +98,12 @@ public class PilotServerTest {
 		args.addProperty("to", "e2");
 		result = PilotServer.dispatch("tools/call", call).getAsJsonObject();
 		assertTrue(result.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString().contains("does not take clickCount"));
+		args.add("ref", com.google.gson.JsonNull.INSTANCE);
+		result = PilotServer.dispatch("tools/call", call).getAsJsonObject();
+		assertEquals("ref is required", result.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString());
+		args.remove("ref");
+		result = PilotServer.dispatch("tools/call", call).getAsJsonObject();
+		assertEquals("ref is required", result.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString());
 	}
 
 	@Test
@@ -105,7 +111,17 @@ public class PilotServerTest {
 		assertEquals(new java.awt.Dimension(1280, 800), UiWindow.size(" 1280 x 800 "));
 		assertThrows(IllegalArgumentException.class, () -> UiWindow.size("1280,800"));
 		assertThrows(IllegalArgumentException.class, () -> UiWindow.size("50x50"));
-		assertThrows(IllegalArgumentException.class, () -> UiWindow.window(null, "800x600", true));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.WindowRequest.parse(null, "800x600", null, null, null, null, true));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.WindowRequest.parse(null, null, "0,0", null, null, null, true));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.WindowRequest.parse(null, null, null, null, "left", null, true));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.WindowRequest.parse(null, "800x600", null, true, null, null, false));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.WindowRequest.parse(null, null, "0,0", true, null, null, false));
+		assertEquals(new java.awt.Point(-1920, 50), UiWindow.position(" -1920 , 50 "));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.position("100x50"));
+		assertEquals(com.intellij.openapi.wm.ToolWindowAnchor.RIGHT, UiWindow.anchor(" Right "));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.anchor("middle"));
+		assertEquals(com.intellij.openapi.wm.ToolWindowType.FLOATING, UiWindow.type("floating"));
+		assertThrows(IllegalArgumentException.class, () -> UiWindow.type("detached"));
 	}
 
 	@Test

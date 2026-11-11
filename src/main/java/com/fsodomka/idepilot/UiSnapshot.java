@@ -2,9 +2,13 @@ package com.fsodomka.idepilot;
 
 import com.intellij.ide.DataManager;
 import com.intellij.openapi.actionSystem.ActionUiKind;
+import com.intellij.openapi.wm.ToolWindow;
+import com.intellij.openapi.wm.impl.InternalDecorator;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.Presentation;
+import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.Toggleable;
+import com.intellij.ui.popup.PopupFactoryImpl;
 import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.actionSystem.impl.ActionButton;
 import com.intellij.openapi.util.text.StringUtil;
@@ -19,14 +23,13 @@ import javax.swing.AbstractButton;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JTable;
 import javax.swing.JTree;
 import javax.swing.ListCellRenderer;
 import javax.swing.tree.TreePath;
 import javax.swing.text.JTextComponent;
 import java.awt.Component;
 import java.awt.Container;
-import java.awt.Dialog;
-import java.awt.Frame;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.Window;
@@ -54,12 +57,13 @@ final class UiSnapshot {
 	private static int lastId;
 
 	/**
-	 * What a ref points at: a component, or with {@code row} >= 0 a row of a list or tree, whose {@code item} (the list
-	 * value or tree node) tells whether the row still shows it.
+	 * What a ref points at: a component, or with {@code row} >= 0 a row of a list, tree or table, whose {@code item} (the
+	 * list value or tree node) or, for a table, {@code text} (the row's rendered text, held strongly, as table values are
+	 * often made on each call) tells whether the row still shows it.
 	 */
-	record Target(WeakReference<Component> component, int row, WeakReference<Object> item) {
+	record Target(WeakReference<Component> component, int row, WeakReference<Object> item, String text) {
 		Target(Component component) {
-			this(new WeakReference<>(component), -1, null);
+			this(new WeakReference<>(component), -1, null, null);
 		}
 
 		/** Whether a row target's row still shows its item (a Compose node: is still showing); true for a component. Call on the EDT. */
@@ -67,8 +71,11 @@ final class UiSnapshot {
 			if (row < 0) {
 				return true;
 			}
-			Object expected = item.get();
 			Component owner = component.get();
+			if (owner instanceof JTable table) {
+				return row < table.getRowCount() && tableRowText(table, row).equals(text);
+			}
+			Object expected = item.get();
 			if (owner != null && isCompose(owner) && expected instanceof Accessible node) {
 				AccessibleContext context = node.getAccessibleContext();
 				return context != null && context.getAccessibleStateSet() != null
@@ -88,23 +95,28 @@ final class UiSnapshot {
 	 * offset and first ref of the next page instead of counting the rest. Given that ref as {@code next}, fails when
 	 * the UI changed so that the page would not continue the previous one.
 	 */
-	static String snapshot(int offset, int limit, String next, boolean bounds, String find, boolean toon, boolean allRows) {
+	static String snapshot(int offset, int limit, String next, boolean bounds, String find, boolean toon, boolean allRows, boolean windowsOnly,
+			boolean classes) {
 		return Edt.compute(() -> {
 			if (offset == 0) {
 				refs.values().removeIf(target -> target.component().get() == null);
 			}
 			Page page = new Page(offset, Math.max(limit, 1), bounds, find, toon);
 			page.allRows = allRows;
+			page.classes = classes;
 			for (Window window : Window.getWindows()) {
 				if (page.full) {
 					break;
 				}
 				if (window.isShowing()) {
-					page.add(0, "window " + quote(title(window)), new Target(window), window.isActive() ? " (active)" : "");
-					children(window, 1, page);
+					page.add(0, "window " + quote(UiWindow.title(window)), new Target(window), UiWindow.windowStates(window));
+					if (!windowsOnly) {
+						children(window, 1, page);
+					}
 				}
 			}
-			return page.finish(next);
+			String text = page.finish(next);
+			return windowsOnly && !page.full ? text + UiWindow.screens(toon) : text;
 		});
 	}
 
@@ -165,6 +177,8 @@ final class UiSnapshot {
 		final boolean toon;
 		/** List every row of lists and trees (at most {@link #MAX_ROWS}), not only those that show. */
 		boolean allRows;
+		/** Add each line's class, and list the unnamed containers of plugin classes that are otherwise flattened. */
+		boolean classes;
 		private final List<String> rows = new ArrayList<>();
 
 		void add(int depth, String text, Target target, String states) {
@@ -263,7 +277,7 @@ final class UiSnapshot {
 		Page page = new Page(0, Integer.MAX_VALUE - 1, false);
 		for (Window window : Window.getWindows()) {
 			if (window.isShowing()) {
-				page.add(0, "window " + quote(title(window)), new Target(window), "");
+				page.add(0, "window " + quote(UiWindow.title(window)), new Target(window), "");
 				children(window, 1, page);
 			}
 		}
@@ -304,7 +318,9 @@ final class UiSnapshot {
 			return shown == null ? null : shown.getBounds();
 		}
 		return owner instanceof JList<?> list ? list.getCellBounds(target.row(), target.row())
-				: owner instanceof JTree tree ? tree.getRowBounds(target.row()) : null;
+				: owner instanceof JTree tree ? tree.getRowBounds(target.row())
+				: owner instanceof JTable table && target.row() < table.getRowCount() && table.getColumnCount() > 0
+				? table.getCellRect(target.row(), 0, true).union(table.getCellRect(target.row(), table.getColumnCount() - 1, true)) : null;
 	}
 
 	/** Whether the component is a Compose for Desktop panel, whose content shows only through its accessible tree. */
@@ -319,6 +335,9 @@ final class UiSnapshot {
 
 	/** {@link #component}'s lookup; call on the EDT. */
 	private static Component resolve(String ref) {
+		if (ref == null) {
+			throw new IllegalArgumentException("ref is required");
+		}
 		Target target = refs.get(ref);
 		Component component = target == null ? null : target.component().get();
 		if (component == null) {
@@ -355,15 +374,19 @@ final class UiSnapshot {
 			}
 			String role = role(child);
 			String name = name(child);
-			boolean listed = !name.isEmpty() || !(child instanceof Container c && c.getComponentCount() > 0 && isGeneric(role));
+			boolean listed = !name.isEmpty() || child instanceof InternalDecorator || page.classes && !isPlatformClass(child)
+					|| !(child instanceof Container c && c.getComponentCount() > 0 && isGeneric(role));
 			int childDepth = depth;
 			if (listed) {
-				page.add(depth, name.isEmpty() ? role : role + " " + quote(name), new Target(child), states(child));
+				page.add(depth, name.isEmpty() ? role : role + " " + quote(name), new Target(child),
+						states(child) + (page.classes ? " (class " + className(child) + ")" : ""));
 				childDepth++;
-				if (child instanceof JList<?> list) {
-					listRows(list, childDepth, page);
-				} else if (child instanceof JTree tree) {
-					treeRows(tree, childDepth, page);
+				switch (child) {
+					case JList<?> list -> listRows(list, childDepth, page);
+					case JTree tree -> treeRows(tree, childDepth, page);
+					case JTable table -> tableRows(table, childDepth, page);
+					default -> {
+					}
 				}
 			}
 			if (isCompose(child)) {
@@ -399,7 +422,7 @@ final class UiSnapshot {
 			int childDepth = depth;
 			if (showing && (!name.isEmpty() || child.getAccessibleChildrenCount() == 0 || !isGeneric(role))) {
 				page.add(depth, name.isEmpty() ? role : role + " " + quote(name),
-						new Target(new WeakReference<>(panel), index[0]++, new WeakReference<>(node)), states(set));
+						new Target(new WeakReference<>(panel), index[0]++, new WeakReference<>(node), null), states(set));
 				childDepth++;
 			}
 			composeNodes(panel, child, childDepth, page, index);
@@ -428,7 +451,7 @@ final class UiSnapshot {
 		int count = list.getModel().getSize();
 		int[] range = rowRange(count, shownFirst, shownLast, page.allRows);
 		for (int i = range[0]; i <= range[1] && !page.full; i++) {
-			row(list, i, list.getModel().getElementAt(i), "listitem", listRowText(list, i), (list.isSelectedIndex(i) ? " (selected)" : "")
+			row(list, i, list.getModel().getElementAt(i), "listitem", listRowText(list, i), checkedItem(list, list.getModel().getElementAt(i)) + (list.isSelectedIndex(i) ? " (selected)" : "")
 					+ offscreen(i, shownFirst, shownLast, page.allRows) + unlisted(i, range, count, page.allRows), depth, page);
 		}
 	}
@@ -500,8 +523,37 @@ final class UiSnapshot {
 		}
 	}
 
+	private static void tableRows(JTable table, int depth, Page page) {
+		Rectangle visible = table.getVisibleRect();
+		int count = table.getRowCount();
+		int shownFirst = count == 0 ? -1 : table.rowAtPoint(new Point(visible.x, visible.y));
+		int shownLast = shownFirst < 0 ? -1 : table.rowAtPoint(new Point(visible.x, visible.y + visible.height - 1));
+		if (shownFirst >= 0 && shownLast < 0) {
+			shownLast = count - 1; // the rows end above the viewport's bottom
+		}
+		int[] range = rowRange(count, shownFirst, shownLast, page.allRows);
+		for (int i = range[0]; i <= range[1] && !page.full; i++) {
+			row(table, i, null, "row", tableRowText(table, i), (table.isRowSelected(i) ? " (selected)" : "")
+					+ offscreen(i, shownFirst, shownLast, page.allRows) + unlisted(i, range, count, page.allRows), depth, page);
+		}
+	}
+
+	/** The text a table shows in row {@code i}: its cells' rendered text, joined by " | ". Call on the EDT. */
+	static String tableRowText(JTable table, int i) {
+		StringBuilder text = new StringBuilder();
+		for (int column = 0; column < table.getColumnCount(); column++) {
+			Component cell = table.prepareRenderer(table.getCellRenderer(i, column), i, column);
+			String part = rendererText(cell);
+			if (!part.isEmpty()) {
+				text.append(text.isEmpty() ? "" : " | ").append(part);
+			}
+		}
+		return StringUtil.shortenTextWithEllipsis(text.toString(), MAX_TEXT, 0);
+	}
+
 	private static void row(Component owner, int row, Object item, String role, String text, String states, int depth, Page page) {
-		page.add(depth, role + " " + quote(text), new Target(new WeakReference<>(owner), row, new WeakReference<>(item)), states);
+		page.add(depth, role + " " + quote(text), new Target(new WeakReference<>(owner), row, new WeakReference<>(item),
+				owner instanceof JTable ? text : null), states);
 	}
 
 	/** The text a cell renderer shows: its own name, else its children's joined, e.g. a panel of labels. */
@@ -579,34 +631,53 @@ final class UiSnapshot {
 		if (component instanceof ActionButton button && button.getAction() instanceof Toggleable) {
 			states.append(toggled(button) ? " (on)" : " (off)");
 		}
+		if (component instanceof InternalDecorator
+				&& UiWindow.toolWindowOf(component) instanceof ToolWindow toolWindow) {
+			states.append(UiWindow.toolWindowStates(toolWindow));
+		}
 		if (component.isFocusOwner()) {
 			states.append(" (focused)");
 		}
 		return states.toString();
 	}
 
+	/** Whether the component's class comes with the JDK, the IDE or Kotlin, rather than from a plugin. */
+	private static boolean isPlatformClass(Component component) {
+		String name = component.getClass().getName();
+		return name.startsWith("java.") || name.startsWith("javax.") || name.startsWith("sun.")
+				|| name.startsWith("com.intellij.") || name.startsWith("com.jetbrains.") || name.startsWith("org.jetbrains.")
+				|| name.startsWith("kotlin.") || name.startsWith("androidx.compose.");
+	}
+
+	/** The class's name without the package, e.g. StructureDiffPanel, Outer$Inner or Outer$1. */
+	private static String className(Component component) {
+		String name = component.getClass().getName();
+		return name.substring(name.lastIndexOf('.') + 1);
+	}
+
 	private static boolean toggled(ActionButton button) {
-		Presentation presentation = button.getPresentation().clone();
+		return toggled(button.getAction(), button, button.getPresentation());
+	}
+
+	/** " (checked)" for a row of an action popup (e.g. a toolbar dropdown) whose ToggleAction is selected. */
+	private static String checkedItem(JList<?> list, Object value) {
+		return value instanceof PopupFactoryImpl.ActionItem item && item.getAction() instanceof Toggleable
+				&& toggled(item.getAction(), list, item.getAction().getTemplatePresentation()) ? " (checked)" : "";
+	}
+
+	/** Whether {@code action} is selected, updated in {@code component}'s context; {@code shown}'s state if the update fails. */
+	private static boolean toggled(AnAction action, Component component, Presentation shown) {
+		Presentation presentation = shown.clone();
 		try {
-			ActionUtil.updateAction(button.getAction(), AnActionEvent.createEvent(
-					DataManager.getInstance().getDataContext(button), presentation, "IdePilot", ActionUiKind.NONE, null));
+			ActionUtil.updateAction(action, AnActionEvent.createEvent(
+					DataManager.getInstance().getDataContext(component), presentation, "IdePilot", ActionUiKind.NONE, null));
 		} catch (RuntimeException e) {
-			return Toggleable.isSelected(button.getPresentation());
+			return Toggleable.isSelected(shown);
 		}
 		return Toggleable.isSelected(presentation);
 	}
 
-	private static String title(Window window) {
-		if (window instanceof Frame frame) {
-			return frame.getTitle();
-		}
-		if (window instanceof Dialog dialog) {
-			return dialog.getTitle();
-		}
-		return window.getClass().getSimpleName();
-	}
-
-	private static String quote(String text) {
+	static String quote(String text) {
 		return '"' + StringUtil.notNullize(text).replace("\"", "\\\"") + '"';
 	}
 }

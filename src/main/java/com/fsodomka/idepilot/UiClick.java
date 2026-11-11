@@ -9,6 +9,7 @@ import javax.swing.SwingUtilities;
 import java.awt.Component;
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.awt.Window;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
 import java.util.Locale;
@@ -77,7 +78,7 @@ final class UiClick {
 				Component c = hit.getKey();
 				Point p = hit.getValue();
 				long now = System.currentTimeMillis();
-				c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_ENTERED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
+				moveOnto(c, p, mask, now);
 				for (int n = 1; n <= clickCount; n++) {
 					c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_PRESSED, now, mask | InputEvent.getMaskForButton(awtButton),
 							p.x, p.y, n, popupOnPress, awtButton));
@@ -115,9 +116,7 @@ final class UiClick {
 			}
 			Component c = hit.getKey();
 			Point p = hit.getValue();
-			long now = System.currentTimeMillis();
-			c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_ENTERED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
-			c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_MOVED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
+			moveOnto(c, p, mask, System.currentTimeMillis());
 		}, ModalityState.stateForComponent(component));
 		return "Hovered " + ref + UiInput.heldNote();
 	}
@@ -160,6 +159,18 @@ final class UiClick {
 
 	private static final int DRAG_STEPS = 10;
 
+	/**
+	 * Enters {@code c} and moves to {@code p} in two steps: popup lists (ListPopupImpl) take their first move as where the
+	 * mouse rests and select the row under it only on a later one, and act on a click only on the selected row.
+	 */
+	@SuppressWarnings("MagicConstant") // mask combines InputEvent *_DOWN_MASK flags
+	private static void moveOnto(Component c, Point p, int mask, long now) {
+		int fromX = p.x > 0 ? p.x - 1 : p.x + 1;
+		c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_ENTERED, now, mask, fromX, p.y, 0, false, MouseEvent.NOBUTTON));
+		c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_MOVED, now, mask, fromX, p.y, 0, false, MouseEvent.NOBUTTON));
+		c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_MOVED, now, mask, p.x, p.y, 0, false, MouseEvent.NOBUTTON));
+	}
+
 	/** The component and point mouse events at the ref's center go to; null if it is no longer showing. Call on the EDT. */
 	private static Map.Entry<Component, Point> hit(Component component, UiSnapshot.Target target) {
 		Point at = center(component, target);
@@ -184,11 +195,39 @@ final class UiClick {
 
 	/**
 	 * Where mouse events at {@code p} (in {@code owner}'s coordinates) go: for a Compose panel the canvas child under
-	 * the point, which has the mouse listeners, with the point in its coordinates; otherwise the owner itself.
+	 * the point, which has the mouse listeners, with the point in its coordinates; otherwise the owner, or, as AWT
+	 * retargets a real click, its nearest ancestor that listens to the mouse (e.g. the tabbed pane of a tab's label).
 	 */
 	private static Map.Entry<Component, Point> under(Component owner, Point p) {
 		Component deepest = UiSnapshot.isCompose(owner) ? SwingUtilities.getDeepestComponentAt(owner, p.x, p.y) : null;
-		return deepest == null || deepest == owner ? Map.entry(owner, p)
-				: Map.entry(deepest, SwingUtilities.convertPoint(owner, p, deepest));
+		if (deepest != null && deepest != owner) {
+			return Map.entry(deepest, SwingUtilities.convertPoint(owner, p, deepest));
+		}
+		for (Component c = owner; c != null && !(c instanceof Window); c = c.getParent()) {
+			if (handlesMouse(c)) {
+				return Map.entry(c, SwingUtilities.convertPoint(owner, p, c));
+			}
+		}
+		return Map.entry(owner, p);
+	}
+
+	/**
+	 * Whether {@code c} takes mouse clicks itself: it has mouse listeners, or a class of its own (not the JDK's)
+	 * overrides processMouseEvent, as ActionButton does after enableEvents, with no listener when it has no tooltip.
+	 */
+	private static boolean handlesMouse(Component c) {
+		if (c.getMouseListeners().length > 0) {
+			return true;
+		}
+		for (Class<?> type = c.getClass(); type != null && !type.getName().startsWith("java.") && !type.getName().startsWith("javax.");
+				type = type.getSuperclass()) {
+			try {
+				type.getDeclaredMethod("processMouseEvent", MouseEvent.class);
+				return true;
+			} catch (NoSuchMethodException e) {
+				// not here; try the superclass
+			}
+		}
+		return false;
 	}
 }

@@ -1,5 +1,10 @@
 package com.fsodomka.idepilot;
 
+import com.intellij.openapi.client.ClientAppSession;
+import com.intellij.openapi.client.ClientKind;
+import com.intellij.openapi.client.ClientProjectSession;
+import com.intellij.openapi.client.ClientSessionsManager;
+
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.configurationStore.ComponentSerializationUtil;
 import com.intellij.openapi.components.PersistentStateComponent;
@@ -55,8 +60,15 @@ final class IdeSettings {
 			add(lines, needle, advanced(bean));
 		}
 		states(ApplicationManager.getApplication(), "app", needle, lines);
+		// per-client services (client="all"), such as the editor's settings, live in the local session's container
+		for (ClientAppSession session : ClientSessionsManager.getAppSessions(ClientKind.LOCAL)) {
+			states(session, "app", needle, lines);
+		}
 		for (Project project : ProjectManager.getInstance().getOpenProjects()) {
 			states(project, "project " + project.getName(), needle, lines);
+			for (ClientProjectSession session : ClientSessionsManager.getProjectSessions(project, ClientKind.LOCAL)) {
+				states(session, "project " + project.getName(), needle, lines);
+			}
 		}
 		if (lines.isEmpty()) {
 			return "(no setting contains \"" + find + "\"; only services already created are searched, and, for a find of "

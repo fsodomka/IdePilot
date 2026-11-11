@@ -53,11 +53,14 @@ intellijPlatform {
     }
 }
 
-// drives every tool once against an IDE already running the plugin, e.g. runIde; -PsmokeUrl=... for another port
+// the sandbox's MCP port: not the plugin's default 63400, which the IDE it is developed in holds (-PidePilotPort=...)
+def sandboxPort = providers.gradleProperty('idePilotPort').getOrElse('63401')
+
+// drives every tool once against an IDE already running the plugin, by default runIde's; -PsmokeUrl=... for another
 tasks.register('smokeTest', Exec) {
     group = 'verification'
     description = 'Runs scripts/smoke.py against a running IDE with the plugin.'
-    commandLine 'python', 'scripts/smoke.py', '--url', providers.gradleProperty('smokeUrl').getOrElse('http://127.0.0.1:63400/mcp')
+    commandLine 'python', 'scripts/smoke.py', '--url', providers.gradleProperty('smokeUrl').getOrElse("http://127.0.0.1:${sandboxPort}/mcp")
     environment 'PYTHONUTF8', '1'
     def idePilotToken = providers.gradleProperty('idePilotToken')
     if (idePilotToken.isPresent()) {
@@ -73,11 +76,7 @@ tasks.withType(org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask).configur
     if (idePilotToken.isPresent()) {
         jvmArgs("-Didepilot.token=${idePilotToken.get()}")
     }
-    // the MCP port, e.g. -PidePilotPort=63401 when another IDE holds the default
-    def idePilotPort = providers.gradleProperty('idePilotPort')
-    if (idePilotPort.isPresent()) {
-        jvmArgs("-Didepilot.port=${idePilotPort.get()}")
-    }
+    jvmArgs("-Didepilot.port=${sandboxPort}")
 }
 
 if (platformLocalPath.isPresent()) {
