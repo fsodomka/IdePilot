@@ -1,0 +1,49 @@
+// Gradle init script: adds a runIdePilot task to every IntelliJ Platform plugin build, which runs the plugin's sandbox
+// like runIde, with IDE Pilot installed, so an agent can drive it over MCP. The plugin's own build needs no change.
+//
+// Install: copy this file to ~/.gradle/init.d/ (any name ending in .gradle), and set in ~/.gradle/gradle.properties:
+//   idePilotZip    IDE Pilot's plugin zip, or a directory holding it (e.g. <IdePilot>/build/distributions, where
+//                  ./gradlew buildPlugin writes it); the newest IdePilot-*.zip there is used. Without it, no task is added.
+//   idePilotToken  the MCP token (optional; without it the sandbox generates one, see Settings | Tools | IDE Pilot)
+// Run: ./gradlew runIdePilot [-PidePilotPort=63402] [-PplatformVersion=...]. The sandbox's MCP port defaults to 63402:
+// not 63400, the plugin's default, which the IDE you develop in holds, nor 63401, IDE Pilot's own sandbox.
+// IDE Pilot needs IntelliJ 2025.2 (build 252) or newer in the sandbox.
+
+allprojects {
+    // IDE Pilot's own build runs its sandbox with runIde
+    if (rootProject.name == 'IdePilot') {
+        return
+    }
+    pluginManager.withPlugin('org.jetbrains.intellij.platform') {
+        def setting = providers.gradleProperty('idePilotZip')
+        if (!setting.isPresent()) {
+            return
+        }
+        def zip = { ->
+            def given = new File(setting.get())
+            if (!given.isDirectory()) {
+                return given
+            }
+            def newest = given.listFiles({ File f -> f.name ==~ /IdePilot-.*\.zip/ } as FileFilter)?.max { it.lastModified() }
+            if (newest == null) {
+                throw new GradleException("No IdePilot-*.zip in ${given}; run ./gradlew buildPlugin in IdePilot")
+            }
+            return newest
+        }
+        intellijPlatformTesting.runIde.register('runIdePilot') {
+            plugins {
+                localPlugin(zip())
+            }
+            task {
+                group = 'intellij platform'
+                description = 'Runs the sandbox like runIde, with IDE Pilot installed for agents to drive over MCP.'
+                autoReload = false
+                def token = providers.gradleProperty('idePilotToken')
+                if (token.isPresent()) {
+                    jvmArgs("-Didepilot.token=${token.get()}")
+                }
+                jvmArgs("-Didepilot.port=${providers.gradleProperty('idePilotPort').getOrElse('63402')}")
+            }
+        }
+    }
+}

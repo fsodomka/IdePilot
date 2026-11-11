@@ -1,6 +1,8 @@
 package com.fsodomka.idepilot;
 
 import com.intellij.execution.Executor;
+import com.intellij.execution.ExecutorRegistry;
+import com.intellij.execution.executors.DefaultDebugExecutor;
 import com.intellij.execution.impl.ConsoleViewImpl;
 import com.intellij.execution.impl.ExecutionManagerImpl;
 import com.intellij.execution.process.BaseProcessHandler;
@@ -21,6 +23,7 @@ import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.terminal.JBTerminalWidget;
 import com.intellij.terminal.TerminalExecutionConsole;
 import com.intellij.ui.content.Content;
+import com.intellij.xdebugger.XDebugSession;
 import com.intellij.xdebugger.XDebuggerManager;
 import com.jediterm.terminal.TtyConnector;
 
@@ -258,9 +261,11 @@ final class RunConsoles {
 	 * start time when known. Call on the EDT.
 	 */
 	private static String session(Project project, RunContentDescriptor descriptor) {
-		List<String> parts = new ArrayList<>();
-		ExecutionManagerImpl.getInstance(project).getExecutors(descriptor).stream().map(Executor::getId).sorted().forEach(parts::add);
 		ProcessHandler handler = descriptor.getProcessHandler();
+		XDebugSession debug = handler == null ? null : Arrays.stream(XDebuggerManager.getInstance(project).getDebugSessions())
+				.filter(s -> s.getDebugProcess().getProcessHandler() == handler).findFirst().orElse(null);
+		List<String> executors = ExecutionManagerImpl.getInstance(project).getExecutors(descriptor).stream().map(Executor::getId).sorted().toList();
+		List<String> parts = new ArrayList<>(executors.isEmpty() ? mode(project, descriptor, debug) : executors);
 		if (handler == null) {
 			parts.add("no process");
 		} else if (handler.isProcessTerminated()) {
@@ -268,9 +273,7 @@ final class RunConsoles {
 		} else if (handler.isProcessTerminating()) {
 			parts.add("stopping");
 		} else {
-			boolean paused = Arrays.stream(XDebuggerManager.getInstance(project).getDebugSessions())
-					.anyMatch(s -> s.getDebugProcess().getProcessHandler() == handler && s.isSuspended());
-			parts.add(paused ? "paused" : "running");
+			parts.add(debug != null && debug.isSuspended() ? "paused" : "running");
 		}
 		if (handler instanceof BaseProcessHandler<?> local && local.getProcess() != null) {
 			try {
@@ -282,5 +285,19 @@ final class RunConsoles {
 			}
 		}
 		return String.join(", ", parts);
+	}
+
+	/**
+	 * The mode of a run the execution manager does not list executors for: a debug session registers its own descriptor
+	 * there, not the one its tab shows. Debug when a debug session runs its process, else the executor whose tool window
+	 * shows the tab; none when neither tells. Call on the EDT.
+	 */
+	private static List<String> mode(Project project, RunContentDescriptor descriptor, XDebugSession debug) {
+		if (debug != null) {
+			return List.of(DefaultDebugExecutor.EXECUTOR_ID);
+		}
+		ToolWindow window = RunContentManager.getInstance(project).getToolWindowByDescriptor(descriptor);
+		Executor executor = window == null ? null : ExecutorRegistry.getInstance().getExecutorById(window.getId());
+		return executor == null ? List.of() : List.of(executor.getId());
 	}
 }

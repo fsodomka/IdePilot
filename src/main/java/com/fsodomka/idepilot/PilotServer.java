@@ -39,6 +39,7 @@ public final class PilotServer implements AppLifecycleListener {
 	@Override
 	public void appFrameCreated(@NotNull List<String> commandLineArgs) {
 		OutputCapture.install();
+		BuildSyncs.install();
 		// the token is read from the password store, which may be slow
 		ApplicationManager.getApplication().executeOnPooledThread(PilotServer::restart);
 	}

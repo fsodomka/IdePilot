@@ -1,27 +1,33 @@
-<idea-plugin>
+<!-- require-restart: the server, output capture and sync tracking start in appFrameCreated, which a dynamic load skips -->
+<idea-plugin require-restart="true">
     <id>com.fsodomka.idepilot</id>
     <name>IDE Pilot</name>
     <vendor>Frantisek Sodomka</vendor>
 
     <description><![CDATA[
-    <p>Lets AI agents see and drive the IDE over MCP, the way the Playwright MCP drives a browser. For plugin
-    development and UI testing in the runIde sandbox.</p>
+    <p><b>Playwright MCP for JetBrains IDEs.</b> An MCP (Model Context Protocol) server that lets AI agents such as
+    Claude Code, Codex, Gemini CLI and Cursor see and use the IDE's UI the way a user does: read windows, dialogs, trees,
+    tables and editors as a text tree, click, type, press shortcuts, run actions, and read logs, consoles and test
+    results.</p>
+    <p>Use it to test your plugin's UI end to end in the runIde sandbox, reproduce bug reports, check dialogs, settings
+    and quick fixes, or run tests and read their failures. It drives the UI, which makes it a good companion to
+    code-level MCP servers.</p>
     <h3>Tools</h3>
     <ul>
       <li><b>pilot_action</b> &ndash; runs an IDE action by ID and returns what it showed (hints, popups, dialogs, notifications), or finds actions by ID or menu text.</li>
-      <li><b>pilot_click</b> &ndash; clicks the component or row with a ref: left, middle or right button, double-click, with modifier keys; or hovers over it to show tooltips, or drags it onto another ref.</li>
-      <li><b>pilot_editor</b> &ndash; reads an editor's text, caret and problems, and lists or applies its Alt+Enter actions.</li>
+      <li><b>pilot_click</b> &ndash; clicks the component or row with a ref: left, middle or right button, double-click, with modifier keys; or hovers over it to show tooltips, or drags it onto another ref; optionally returns what it showed, as pilot_action does.</li>
+      <li><b>pilot_editor</b> &ndash; reads an editor's text, caret and problems, moves its caret, and lists or applies its Alt+Enter actions.</li>
       <li><b>pilot_evaluate</b> &ndash; runs a Groovy script inside the IDE.</li>
       <li><b>pilot_log</b> &ndash; the idea.log tail, the IDE's caught exceptions, recent UI freezes, notifications, stdout/stderr, or Run/Debug sessions (mode, state, process ID) and their console text, and Terminal tabs, or test run results (counts, failed tests with message and stack), by tab name or running only.</li>
       <li><b>pilot_open</b> &ndash; opens a project, or a file at a line.</li>
       <li><b>pilot_screenshot</b> &ndash; PNG of a component, or of the active window with its popups.</li>
       <li><b>pilot_scroll</b> &ndash; scrolls a scroll pane by pages or to its top or bottom, or a list, tree or table to the row with some text.</li>
       <li><b>pilot_settings</b> &ndash; effective values of registry keys, Advanced Settings and IDE and project settings, defaults included.</li>
-      <li><b>pilot_snapshot</b> &ndash; the visible UI as a text tree of windows, components, list and tree rows, and Compose (Jewel) UI,
-        with role, name, state and a ref to act on; paged, optionally with screen positions, and optionally with every row of lists and trees, not only those that show.</li>
+      <li><b>pilot_snapshot</b> &ndash; the visible UI as a text tree of windows, components, list, tree and table rows, and Compose (Jewel) UI,
+        with role, name, state and a ref to act on; paged, optionally with screen positions, and optionally with every row of lists, trees and tables, not only those that show; or only the windows (active, maximized, modal, indexing) and screens.</li>
       <li><b>pilot_type</b> &ndash; types text and presses keys, optionally replacing the content; shortcuts run their actions; selects combo box items by text; holds modifier keys down across calls until released.</li>
-      <li><b>pilot_window</b> &ndash; brings a window to the front, resizes it, or closes it.</li>
-      <li><b>pilot_wait_for</b> &ndash; waits for text to show or go, for indexing or background tasks to finish, for new Run console or Terminal output, or for a time.</li>
+      <li><b>pilot_window</b> &ndash; brings a window to the front, maximizes, restores, resizes, moves or closes it, and moves or detaches tool windows.</li>
+      <li><b>pilot_wait_for</b> &ndash; waits for text to show or go, for indexing, background tasks or a Gradle/Maven sync to finish, for new Run console or Terminal output (returning the matching lines), or for a time.</li>
     </ul>
     <p>The server listens on localhost and needs a token: generate it in <b>Settings | Tools | IDE Pilot</b> and paste
     it into the agent's MCP settings.</p>

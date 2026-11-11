@@ -9,7 +9,7 @@ import static org.junit.Assert.assertTrue;
 /** pilot_wait_for's checks that need no running IDE: arguments and a plain time wait. */
 public class WaitForTest {
 	private static IdeActions.Wait time(double seconds) {
-		return new IdeActions.Wait(null, null, false, false, null, null, seconds);
+		return new IdeActions.Wait(null, null, false, false, null, false, false, null, null, seconds);
 	}
 
 	@Test
@@ -21,7 +21,7 @@ public class WaitForTest {
 	@Test
 	public void sessionWithoutConsoleFails() {
 		assertThrows(IllegalArgumentException.class,
-				() -> IdeActions.waitFor(new IdeActions.Wait(null, null, false, false, null, "app", 0.1), 1));
+				() -> IdeActions.waitFor(new IdeActions.Wait(null, null, false, false, null, false, false, null, "app", 0.1), 1));
 	}
 
 	@Test
@@ -38,6 +38,12 @@ public class WaitForTest {
 		assertEquals("fresh\n", RunConsoles.since("fresh\n", mark));
 		// marked while empty
 		assertEquals("first\n", RunConsoles.since("first\n", RunConsoles.Mark.of("")));
+	}
+
+	@Test
+	public void firstChangeNamesANewLineElseSaysOneWent() {
+		assertEquals("- label \"75%\" [ref=e2]", IdeActions.firstChange("- window\n  - label \"50%\" [ref=e2]", "- window\n  - label \"75%\" [ref=e2]"));
+		assertEquals("a line went", IdeActions.firstChange("- window\n- label", "- window"));
 	}
 
 	@Test

@@ -43,6 +43,9 @@ final class Evaluator {
 			IdeFrame frame = IdeFocusManager.getGlobalInstance().getLastFocusedFrame();
 			project = frame == null ? null : frame.getProject();
 		}
+		if (project != null && project.isDisposed()) {
+			project = null; // the last focused frame may be that of a closed project
+		}
 		if (project != null) {
 			return project;
 		}

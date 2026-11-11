@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import java.util.Base64;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /** The MCP tools: their schemas for tools/list and their calls for tools/call. */
 final class PilotTools {
@@ -28,23 +29,33 @@ final class PilotTools {
 						"bounds", "boolean", "Add each line's screen bounds as @x,y wxh; default false",
 						"find", "string", "Only lines whose role, name or state contains this text (case-insensitive), "
 								+ "each under its ancestors (window, panels, tree) for context; pass it again for the next page",
-						"allRows", "boolean", "List every row of lists and trees (popups such as Search Everywhere and "
+						"allRows", "boolean", "List every row of lists, trees and tables (popups such as Search Everywhere and "
 								+ "completion included), not only those that show: at most 200 each, around those that show (the "
 								+ "first and last listed say how many more are not); those that do not show are marked "
 								+ "(offscreen), and clicking one scrolls it into view first; default false",
+						"classes", "boolean", "Add each line's Java class as (class Name), and list the unnamed panels of "
+								+ "plugin classes (not JDK, IntelliJ or Kotlin ones) that are otherwise folded into their children, "
+								+ "e.g. a plugin's own panel; find matches class names too; default false",
+						"windowsOnly", "boolean", "List only the windows (title, ref, states), not their components, e.g. to pick one for pilot_window, "
+								+ "followed by the screens (ID, primary, @x,y wxh, scale where not 1); "
+								+ "for the tool windows and their state, use find \"(tool window\" instead; default false",
 						"format", "string", "tree (default): indented lines; toon: a TOON table lines[N]{depth,ref,role,"
 								+ "name,states} (plus x,y,w,h with bounds), followed by nextOffset and next when there is more"),
 				tool("pilot_click", "Click the component with the given ref from the last pilot_snapshot; or hover "
-								+ "over it, or drag it onto another ref. A click returns once its handlers ran; popups and dialogs "
-								+ "that load in the background may show later: pilot_wait_for them before pilot_snapshot.", List.of("ref"),
+								+ "over it, or drag it onto another ref. A click returns once its handlers ran; with wait, it then "
+								+ "watches the UI and returns what showed meanwhile (popups, dialogs, tooltips, tool windows, as "
+								+ "snapshot lines with refs, those gone again marked so) and the notifications fired, as pilot_action does; "
+								+ "for what shows later, pilot_wait_for it.", List.of("ref"),
 						"ref", "string", REF,
 						"button", "string", "left (default), middle or right; right opens context menus",
 						"clickCount", "integer", "1 (default), 2 for a double-click, or 3",
 						"modifiers", "string", "Keys held during the click, e.g. ctrl, shift, ctrl shift, alt, meta",
 						"hover", "boolean", "Move the mouse onto ref instead of clicking, to show tooltips and hover "
-								+ "popups; follow with pilot_wait_for, as they show after a delay",
+								+ "popups; they show after a delay, so give wait (e.g. 2) or follow with pilot_wait_for",
 						"to", "string", "Drag ref onto this ref instead of clicking (IDE drags such as tool window "
-								+ "buttons and editor tabs; not native drag and drop)"),
+								+ "buttons and editor tabs; not native drag and drop)",
+						"wait", "number", "Seconds to watch for what the click shows, default 0 (return at once); e.g. 2 "
+								+ "for a Run/Debug button or a tooltip; at most " + MAX),
 				tool("pilot_scroll", "Scroll the scroll pane that holds ref (or that ref is) by pages or to its top or "
 								+ "bottom; or scroll a list, tree or table at ref until the first row containing some text "
 								+ "shows. Snapshots list only the rows that show, so scroll to reach the others.",
@@ -55,10 +66,18 @@ final class PilotTools {
 						"to", "string", "Instead of direction, scroll to the first row whose text contains this (case-insensitive); "
 								+ "trees: only expanded rows"),
 				tool("pilot_window", "Bring a window (project frame, dialog, detached tool window) to the front, "
-								+ "resize it, or close it as its close button would. Without ref, the active window.",
+								+ "maximize, restore, resize or move it, move or detach the tool window that holds ref, or close the "
+								+ "window as its close button would. Without ref, the active window (and the focused component's "
+								+ "tool window). Returns what was done, then a State: line with the window's (and tool window's) "
+								+ "states as pilot_snapshot shows them; read them with pilot_snapshot, which does not act.",
 						List.of(),
 						"ref", "string", "Ref of the window, or of any component in it",
+						"maximize", "boolean", "true maximizes the frame, false restores it; not for dialogs",
 						"size", "string", "Resize to WIDTHxHEIGHT, e.g. 1280x800; un-maximizes a maximized frame",
+						"position", "string", "Move the window's top-left corner to X,Y in screen coordinates (as pilot_snapshot "
+								+ "bounds and screens give them), e.g. 100,50; un-maximizes a maximized frame; fails off every screen",
+						"anchor", "string", "Move the tool window that holds ref to left, right, top or bottom",
+						"type", "string", "Make the tool window that holds ref docked, floating, windowed or sliding",
 						"close", "boolean", "Close the window; returns at once, so follow with pilot_wait_for gone"),
 				tool("pilot_type", "Type text and/or press a key. With ref, focuses that component first; otherwise "
 								+ "goes to the focused component. Key events go through the IDE, so shortcuts run their actions. "
@@ -80,14 +99,21 @@ final class PilotTools {
 						List.of(),
 						"ref", "string", "Ref of an editor (text \"Editor for ...\" in the snapshot)",
 						"lines", "string", "Line range to show, N or N-M (1-based); at most 300 lines at once",
-						"caret", "string", "Move the caret to LINE or LINE:COLUMN (1-based) first, e.g. to a problem",
+						"caret", "string", "Move the caret to LINE or LINE:COLUMN (1-based; columns count characters, a tab as one, as problems give them) first, e.g. to a problem, and focus the editor, so actions run there",
+						"select", "string", "Select FROM-TO first, each LINE or LINE:COLUMN (1-based, TO exclusive), e.g. "
+								+ "10:5-12:20 or 10-13 for lines 10-12 (TO may be the line after the last: the end of the "
+								+ "text), and focus the editor, so actions run on the selection; the caret "
+								+ "goes to TO; not with caret",
 						"problems", "boolean", "List the highlighted problems as LINE:COLUMN SEVERITY: message; "
 								+ "pilot_wait_for idle first, as analysis runs after edits",
 						"actions", "boolean", "List the Alt+Enter actions at the caret",
 						"apply", "string", "Apply the Alt+Enter action at the caret with this text (as actions lists it); "
 								+ "returns at once, as it may open a dialog"),
-				tool("pilot_log", "The last lines of the IDE's idea.log, or with errors the exceptions the IDE caught "
-								+ "(the red balloon in the status bar), newest last.", List.of(),
+				tool("pilot_log", "What the IDE and its runs report: the last lines of idea.log by default, or with one "
+								+ "flag instead: sessions (the Run/Debug tabs: Run or Debug, running, paused or terminated), "
+								+ "consoles (their output), tests (test run results), tasks (background tasks), notifications, "
+								+ "errors (exceptions the IDE caught, the red balloon), freezes, or output (the IDE's stdout/stderr); "
+								+ "newest last.", List.of(),
 						"errors", "boolean", "Return the IDE's caught exceptions instead of the log; default false",
 						"freezes", "boolean", "Return the newest UI freezes (threadDumps-freeze-* folders: date, time, "
 								+ "culprit, duration, and the UI thread's stack) instead of the log; lines is then the "
@@ -108,6 +134,9 @@ final class PilotTools {
 								+ "failed, ignored, running, duration), then the failed tests with message and stack, or with "
 								+ "contains the tests of any state whose name (Suite.test) contains it; lines is then the most "
 								+ "tests per tab; default false",
+						"tasks", "boolean", "Return the running background tasks (progress in the status bar, and modal "
+								+ "progress) instead of the log, one per line: title, text | detail, percent done or "
+								+ "indeterminate, cancellable, [project]; default false",
 						"session", "string", "With consoles, sessions or tests, only the tabs whose name contains this (case-insensitive)",
 						"running", "boolean", "With consoles, sessions or tests, only those whose process still runs; default false",
 						"lines", "integer", "Number of lines, default 50",
@@ -141,14 +170,25 @@ final class PilotTools {
 						"path", "string", "Absolute path of a project directory or a file",
 						"line", "integer", "1-based line to go to in a file"),
 				tool("pilot_wait_for", "Wait until all the given conditions hold: text shows in the UI, text is gone, "
-								+ "indexing or all background tasks have finished, text shows in a Run console or Terminal tab, and/or time "
-								+ "has passed. With text, returns the snapshot lines that contain it, with their refs.",
+								+ "indexing, all background tasks, a named one or a build sync have finished, the UI has settled, text shows in a Run console or Terminal tab, and/or time "
+								+ "has passed. With text, returns the snapshot lines that contain it, with their refs; with console, "
+								+ "the new console lines that contain it, with their tab's name.",
 						List.of(),
 						"text", "string", "Wait until this text shows in a window, component or row",
 						"gone", "string", "Wait until this text no longer shows",
 						"smart", "boolean", "Wait until no open project is opening or indexing",
 						"idle", "boolean", "Wait until no background task runs (progress in the status bar: "
 								+ "indexing, Gradle sync, builds, ...)",
+						"task", "string", "Wait until no background task whose title or text contains this (case-insensitive) "
+								+ "runs, e.g. Indexing; pilot_log tasks lists them",
+						"sync", "boolean", "Wait until a Gradle/Maven sync has ended (start one with ide_reload_project or "
+								+ "pilot_action) and none runs; a sync that ended up to a minute before the wait counts. Lists "
+								+ "the syncs that ended since the last wait with sync (earlier ones of a project marked "
+								+ "superseded), and fails with the error when a project's latest sync failed or was cancelled",
+						"settled", "boolean", "Wait until the UI stops changing after a click or key: the snapshot stays "
+								+ "the same for 300 ms and no UI events are queued (toolbars, diff panels and tables that update "
+								+ "a moment later); use instead of a fixed time wait. Times out while something keeps changing "
+								+ "(a progress bar, a timer), naming a changing line",
 						"console", "string", "Wait until this text shows in a Run/Debug console or Terminal tab, in output written since the "
 								+ "last pilot call that acted (pilot_action, pilot_click, pilot_type, pilot_evaluate, pilot_open, "
 								+ "pilot_editor apply, pilot_window), so a previous run's output does not count; a run "
@@ -196,7 +236,8 @@ return result;
 					yield shot.description();
 				}
 				case "pilot_snapshot" -> UiSnapshot.snapshot(integer(arguments, "offset", 0), integer(arguments, "limit", 150), string(arguments, "next"), bool(arguments, "bounds"), string(arguments, "find"),
-						format(string(arguments, "format")), bool(arguments, "allRows"));
+						format(string(arguments, "format")), bool(arguments, "allRows"), bool(arguments, "windowsOnly"),
+						bool(arguments, "classes"));
 				case "pilot_action" -> {
 					String id = string(arguments, "id");
 					String find = string(arguments, "find");
@@ -210,48 +251,57 @@ return result;
 				}
 				case "pilot_settings" -> {
 					int limit = limit(arguments); // checked before find, as before
-					yield IdeSettings.find(arguments.get("find").getAsString(), limit);
+					yield IdeSettings.find(required(arguments, "find"), limit);
 				}
-				case "pilot_evaluate" -> Evaluator.eval(arguments.get("script").getAsString(), string(arguments, "ref"),
+				case "pilot_evaluate" -> Evaluator.eval(required(arguments, "script"), string(arguments, "ref"),
 						Math.min(number(arguments, "timeout", 30), IdeActions.MAX_SECONDS));
-				case "pilot_open" -> IdeActions.open(arguments.get("path").getAsString(),
+				case "pilot_open" -> IdeActions.open(required(arguments, "path"),
 						arguments.has("line") ? arguments.get("line").getAsInt() : null);
 				case "pilot_wait_for" -> {
 					double time = number(arguments, "time", 0);
 					yield IdeActions.waitFor(new IdeActions.Wait(string(arguments, "text"), string(arguments, "gone"),
-									bool(arguments, "smart"), bool(arguments, "idle"), string(arguments, "console"),
+									bool(arguments, "smart"), bool(arguments, "idle"), string(arguments, "task"), bool(arguments, "sync"), bool(arguments, "settled"), string(arguments, "console"),
 									string(arguments, "session"), time),
 							number(arguments, "timeout", Math.max(10, time + 10)));
 				}
 				case "pilot_scroll" -> UiScroll.scroll(string(arguments, "ref"), string(arguments, "direction"),
 						number(arguments, "pages", 1), string(arguments, "to"));
-				case "pilot_window" -> UiWindow.window(string(arguments, "ref"), string(arguments, "size"), bool(arguments, "close"));
+				case "pilot_window" -> UiWindow.window(UiWindow.WindowRequest.parse(string(arguments, "ref"), string(arguments, "size"), string(arguments, "position"),
+						optionalBool(arguments, "maximize"),
+						string(arguments, "anchor"), string(arguments, "type"), bool(arguments, "close")));
 				case "pilot_click" -> {
-					String ref = arguments.get("ref").getAsString();
+					String ref = required(arguments, "ref");
 					String to = string(arguments, "to");
+					String modifiers = string(arguments, "modifiers");
+					Supplier<String> click;
 					if (bool(arguments, "hover")) {
 						if (to != null || arguments.has("clickCount") || arguments.has("button")) {
-							throw new IllegalArgumentException("hover takes only ref and modifiers");
+							throw new IllegalArgumentException("hover takes only ref, modifiers and wait");
 						}
-						yield UiClick.hover(ref, string(arguments, "modifiers"));
-					}
-					if (to != null) {
+						click = () -> UiClick.hover(ref, modifiers);
+					} else if (to != null) {
 						if (arguments.has("clickCount")) {
 							throw new IllegalArgumentException("to (drag) does not take clickCount");
 						}
-						yield UiClick.drag(ref, to, string(arguments, "button"), string(arguments, "modifiers"));
+						click = () -> UiClick.drag(ref, to, string(arguments, "button"), modifiers);
+					} else {
+						int clickCount = integer(arguments, "clickCount", 1);
+						click = () -> UiClick.click(ref, string(arguments, "button"), clickCount, modifiers);
 					}
-					yield UiClick.click(ref, string(arguments, "button"), integer(arguments, "clickCount", 1),
-							string(arguments, "modifiers"));
+					// a click has run once it returns; one still handled after a second says so itself
+					yield IdeActions.watched(Math.min(number(arguments, "wait", 0), IdeActions.MAX_SECONDS), ran -> {
+						ran.set(true);
+						return click.get();
+					});
 				}
 				case "pilot_editor" -> UiEditor.editor(new UiEditor.Request(string(arguments, "ref"), string(arguments, "lines"),
-						string(arguments, "caret"), bool(arguments, "problems"), bool(arguments, "actions"), string(arguments, "apply")));
+						string(arguments, "caret"), string(arguments, "select"), bool(arguments, "problems"), bool(arguments, "actions"), string(arguments, "apply")));
 				case "pilot_type" -> UiInput.type(string(arguments, "ref"), string(arguments, "text"), string(arguments, "key"),
 						bool(arguments, "clear"), string(arguments, "hold"), string(arguments, "release"));
 				case "pilot_log" -> {
 					String contains = string(arguments, "contains");
 					String mode = bool(arguments, "notifications") ? "notifications" : bool(arguments, "output") ? "output"
-							: bool(arguments, "consoles") ? "consoles" : bool(arguments, "sessions") ? "sessions" : bool(arguments, "tests") ? "tests" : bool(arguments, "freezes") ? "freezes"
+							: bool(arguments, "consoles") ? "consoles" : bool(arguments, "sessions") ? "sessions" : bool(arguments, "tests") ? "tests" : bool(arguments, "tasks") ? "tasks" : bool(arguments, "freezes") ? "freezes"
 							: bool(arguments, "errors") ? "errors" : "tail";
 					yield switch (mode) {
 						case "notifications" -> IdeLog.notifications(integer(arguments, "lines", 20), contains);
@@ -261,6 +311,7 @@ return result;
 						case "sessions" -> RunConsoles.sessions(string(arguments, "session"), bool(arguments, "running"));
 						case "tests" -> TestResults.tests(integer(arguments, "lines", 50), contains, string(arguments, "session"),
 								bool(arguments, "running"));
+						case "tasks" -> BackgroundTasks.tasks(integer(arguments, "lines", 50), contains);
 							case "freezes" -> IdeLog.freezes(integer(arguments, "lines", 5), contains);
 						case "errors" -> IdeLog.errors(integer(arguments, "lines", 50), contains);
 						default -> IdeLog.tail(integer(arguments, "lines", 50), contains);
@@ -305,6 +356,11 @@ return result;
 		return arguments.has(name) && !arguments.get(name).isJsonNull() && arguments.get(name).getAsBoolean();
 	}
 
+	/** The boolean argument, or null when it is absent or null. */
+	private static Boolean optionalBool(JsonObject arguments, String name) {
+		return arguments.has(name) && !arguments.get(name).isJsonNull() ? arguments.get(name).getAsBoolean() : null;
+	}
+
 	private static int integer(JsonObject arguments, String name, int fallback) {
 		return arguments.has(name) && !arguments.get(name).isJsonNull() ? arguments.get(name).getAsInt() : fallback;
 	}
@@ -335,6 +391,15 @@ return result;
 
 	private static String string(JsonObject arguments, String name) {
 		return arguments.has(name) && !arguments.get(name).isJsonNull() ? arguments.get(name).getAsString() : null;
+	}
+
+	/** {@link #string}, failing with "name is required" when the argument is missing or null. */
+	private static String required(JsonObject arguments, String name) {
+		String value = string(arguments, name);
+		if (value == null) {
+			throw new IllegalArgumentException(name + " is required");
+		}
+		return value;
 	}
 
 	/** A tool with its input properties given as name, type, description triples. */
