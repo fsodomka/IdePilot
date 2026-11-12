@@ -787,21 +787,34 @@ def test_log_tests(client, project):
 
 
 def test_settings(client, project):
-    step("settings: registry, Advanced Settings and service state, defaults included")
+    step("settings: registry keys by a part, an Advanced Setting by ID, a service's state by class name")
     text = client.text("pilot_settings", find="ide.experimental.ui")
     assert re.search(r"^registry ide\.experimental\.ui = (true|false)", text, re.M), text
+    # every key, as the IDE's own (internal) list has them: the platform's and the plugins'
+    count = client.text("pilot_evaluate", script="com.intellij.openapi.util.registry.Registry.getAll().size()").strip()
+    text = client.text("pilot_settings", find="registry ", limit=1)
+    assert text.splitlines()[-1] == f"... {int(count) - 1} more; narrow find or raise limit", (count, text)
     # set by this test at its start; its default is not written to ide.general.xml
-    text = client.text("pilot_settings", find="GeneralSettings.confirmOpenNewProject2")
+    text = client.text("pilot_settings", find="com.intellij.ide.GeneralSettings.confirmOpenNewProject2")
     assert "app ide.general.xml GeneralSettings.confirmOpenNewProject2 = 0" in text, text
-    text = client.text("pilot_settings", find="GeneralSettings.", limit=200)
+    text = client.text("pilot_settings", find="com.intellij.ide.GeneralSettings", limit=200)
     assert re.search(r"GeneralSettings\.\w+ = .* \(default\)$", text, re.M), text
-    text = client.text("pilot_settings", find="advanced ", limit=1)
-    assert re.match(r'advanced \S+ ".+" = .* \((default|changed)\)$', text.splitlines()[0]), text
+    # an Advanced Setting of each type: boolean, number, text and enum
+    for setting, value in (("terminal.show.application.title", "(true|false)"), ("ide.max.recent.projects", r"\d+"),
+                           ("ssh.tool.custom.path", ".+"), ("editor.paste.line.copied.from.empty.selection", ".+")):
+        text = client.text("pilot_settings", find=setting)
+        assert re.search(rf"^advanced {re.escape(setting)} = {value} \((default|changed)\)$", text, re.M), text
     # a per-client service (client="all"), in the local session's container, not the application's
-    text = client.text("pilot_settings", find="EditorSettings.IS_DND_ENABLED")
+    text = client.text("pilot_settings", find="com.intellij.openapi.editor.ex.EditorSettingsExternalizable.IS_DND_ENABLED")
     assert re.search(r"^app editor\.xml EditorSettings\.IS_DND_ENABLED = (true|false) \((default|changed)\)$", text, re.M), text
-    text = client.text("pilot_settings", find="zz-no-such-setting")
-    assert text.startswith("(no setting contains"), text
+    # a plugin's service is not found: its class loader cannot be reached through public API
+    text = client.text("pilot_settings", find="git4idea.config.GitVcsApplicationSettings")
+    assert text.startswith("(no setting found for"), text
+    # neither a part of an Advanced Setting's ID nor a class that is no service finds anything, and logs no error
+    for find in ("zz-no-such-setting", "ide.max.recent.project", "java.lang.String", "com.intellij.openapi.project.Project"):
+        text = client.text("pilot_settings", find=find)
+        assert text.startswith("(no setting found for") or text.startswith("registry "), text
+    assert client.text("pilot_settings", find="zz-no-such-setting").startswith("(no setting found for")
 
 
 def test_table(client, project):

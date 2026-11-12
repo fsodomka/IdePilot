@@ -1,22 +1,19 @@
 package com.fsodomka.idepilot;
 
-import com.intellij.openapi.client.ClientAppSession;
-import com.intellij.openapi.client.ClientKind;
-import com.intellij.openapi.client.ClientProjectSession;
-import com.intellij.openapi.client.ClientSessionsManager;
-
-import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.configurationStore.ComponentSerializationUtil;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.components.ComponentManager;
 import com.intellij.openapi.components.PersistentStateComponent;
+import com.intellij.openapi.components.Service;
 import com.intellij.openapi.components.State;
-import com.intellij.openapi.options.advanced.AdvancedSettingBean;
+import com.intellij.openapi.extensions.ExtensionPointName;
 import com.intellij.openapi.options.advanced.AdvancedSettings;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.JDOMExternalizable;
 import com.intellij.openapi.util.registry.Registry;
+import com.intellij.openapi.util.registry.RegistryKeyBean;
 import com.intellij.openapi.util.registry.RegistryValue;
-import com.intellij.serviceContainer.ComponentManagerImpl;
 import com.intellij.util.xmlb.Accessor;
 import com.intellij.util.xmlb.XmlSerializerUtil;
 import org.jdom.Element;
@@ -24,58 +21,86 @@ import org.jdom.Element;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.MissingResourceException;
 import java.util.Objects;
+import java.util.ResourceBundle;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The effective values of IDE and project settings, defaults included: registry keys, Advanced Settings, and the
- * persisted state of the application's and open projects' services.
+ * persisted state of the application's and open projects' services. Through public API only, which lists the registry
+ * keys but neither the Advanced Settings nor the services: those are found by their ID and class name.
  */
 final class IdeSettings {
 	private static final int MAX_VALUE = 160;
-	/** The shortest find that creates the services it names. */
-	private static final int MIN_CREATE = 4;
+	private static final ExtensionPointName<RegistryKeyBean> REGISTRY_KEYS = ExtensionPointName.create("com.intellij.registryKey");
+	/** A class name, as its lowercase packages and a capitalized name, then maybe a dot and a part of a property name. */
+	private static final Pattern SERVICE = Pattern.compile("((?:[a-z_]\\w*\\.)+[A-Z][\\w$]*)(?:\\.(.*))?");
+	/** An Advanced Setting's value and default, read as each of its possible types; the wrong ones fail to cast. */
+	private static final List<Function<String, Object[]>> ADVANCED = List.of(
+			id -> new Object[]{AdvancedSettings.getBoolean(id), AdvancedSettings.getDefaultBoolean(id)},
+			id -> new Object[]{AdvancedSettings.getInt(id), AdvancedSettings.getDefaultInt(id)},
+			id -> new Object[]{AdvancedSettings.getString(id), AdvancedSettings.getDefaultString(id)},
+			IdeSettings::advancedEnum);
 
 	private IdeSettings() {
 	}
 
 	/**
-	 * The settings whose line contains {@code find} (case-insensitive), at most {@code limit}:
-	 * {@code registry KEY = VALUE}, {@code advanced ID "title" = VALUE}, and
-	 * {@code app|project NAME FILE Component.property = VALUE}, marked (default) or (changed) where known.
+	 * At most {@code limit} settings: the registry keys whose line {@code registry KEY = VALUE} contains {@code find}
+	 * (case-insensitive); the Advanced Setting with the ID {@code find}, as {@code advanced ID = VALUE}; and, for the
+	 * class name of a service (then maybe a dot and a part of a property name), its persisted state, as
+	 * {@code app|project NAME FILE Component.property = VALUE}; marked (default) or (changed) where known.
 	 */
 	static String find(String find, int limit) {
 		String needle = find.toLowerCase(Locale.ROOT);
 		List<String> lines = new ArrayList<>();
-		for (RegistryValue value : Registry.getAll()) {
-			add(lines, needle, "registry " + value.getKey() + " = " + value.asString() + (value.isChangedFromDefault() ? " (changed)" : ""));
-		}
-		for (AdvancedSettingBean bean : AdvancedSettingBean.EP_NAME.getExtensionList()) {
-			add(lines, needle, advanced(bean));
-		}
-		states(ApplicationManager.getApplication(), "app", needle, lines);
-		// per-client services (client="all"), such as the editor's settings, live in the local session's container
-		for (ClientAppSession session : ClientSessionsManager.getAppSessions(ClientKind.LOCAL)) {
-			states(session, "app", needle, lines);
-		}
-		for (Project project : ProjectManager.getInstance().getOpenProjects()) {
-			states(project, "project " + project.getName(), needle, lines);
-			for (ClientProjectSession session : ClientSessionsManager.getProjectSessions(project, ClientKind.LOCAL)) {
-				states(session, "project " + project.getName(), needle, lines);
+		for (String key : registryKeys()) {
+			try {
+				RegistryValue value = Registry.get(key);
+				add(lines, needle, "registry " + key + " = " + value.asString() + (value.isChangedFromDefault() ? " (changed)" : ""));
+			} catch (MissingResourceException e) {
+				// a key that is declared but has no value is skipped
 			}
 		}
-		if (lines.isEmpty()) {
-			return "(no setting contains \"" + find + "\"; only services already created are searched, and, for a find of "
-					+ MIN_CREATE + " or more characters, those whose class or state name contains it)";
+		String advanced = advanced(find.strip());
+		if (advanced != null) {
+			lines.add(advanced);
 		}
-		String more = lines.size() > limit ? "\n... " + (lines.size() - limit) + " more; narrow find" : "";
+		Matcher service = SERVICE.matcher(find.strip());
+		if (service.matches()) {
+			states(service.group(1), service.group(2) == null ? "" : service.group(2).toLowerCase(Locale.ROOT), lines);
+		}
+		if (lines.isEmpty()) {
+			return "(no setting found for \"" + find + "\": give a part of a registry key, the exact ID of an Advanced Setting, "
+					+ "or the class name of a service with persisted state, e.g. com.intellij.ide.GeneralSettings, "
+					+ "or with a part of a property name, com.intellij.ide.GeneralSettings.confirm; services of the platform only)";
+		}
+		String more = lines.size() > limit ? "\n... " + (lines.size() - limit) + " more; narrow find or raise limit" : "";
 		return String.join("\n", lines.subList(0, Math.min(lines.size(), limit))) + more;
+	}
+
+	/** The registry's keys: the platform's, from its bundle, and the plugins', from their extensions. */
+	private static Set<String> registryKeys() {
+		Set<String> keys = new TreeSet<>();
+		for (String key : ResourceBundle.getBundle(Registry.REGISTRY_BUNDLE, Locale.ROOT, Registry.class.getClassLoader()).keySet()) {
+			if (!key.endsWith(".description") && !key.endsWith(".restartRequired")) {
+				keys.add(key);
+			}
+		}
+		for (RegistryKeyBean bean : REGISTRY_KEYS.getExtensionList()) {
+			keys.add(bean.key);
+		}
+		return keys;
 	}
 
 	private static void add(List<String> lines, String needle, String line) {
@@ -84,57 +109,79 @@ final class IdeSettings {
 		}
 	}
 
-	private static String advanced(AdvancedSettingBean bean) {
-		try {
-			// getSetting is protected; the public getters need the type, and an enum's class is internal
-			Method getSetting = AdvancedSettings.class.getDeclaredMethod("getSetting", String.class);
-			getSetting.setAccessible(true);
-			Object value = getSetting.invoke(AdvancedSettings.getInstance(), bean.id);
-			return "advanced " + bean.id + " \"" + bean.title() + "\" = " + render(value)
-					+ (Objects.equals(value, bean.getDefaultValueObject()) ? " (default)" : " (changed)");
-		} catch (ReflectiveOperationException | RuntimeException e) {
-			return null;
+	/** The Advanced Setting with this ID as a line, or null when there is none. */
+	private static String advanced(String id) {
+		for (Function<String, Object[]> typed : ADVANCED) {
+			try {
+				Object[] value = typed.apply(id);
+				return "advanced " + id + " = " + render(value[0]) + (Objects.equals(value[0], value[1]) ? " (default)" : " (changed)");
+			} catch (ClassCastException e) {
+				// of another type
+			} catch (IllegalArgumentException e) {
+				return null; // no such setting
+			}
 		}
+		return null;
+	}
+
+	/** As any enum: the public getters need the setting's own enum class, which only its internal declaration names. */
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	private static Object[] advancedEnum(String id) {
+		return new Object[]{AdvancedSettings.getEnum(id, (Class) Enum.class), AdvancedSettings.getDefaultEnum(id, (Class) Enum.class)};
 	}
 
 	/**
-	 * The properties of {@code manager}'s persistent services: those created, and those whose class or state name
-	 * contains {@code needle}, created now. A state kept as XML is read from the service's own public properties.
+	 * The properties containing {@code needle} of the service {@code className}, of the application and of each open
+	 * project, created if it is not yet. A state kept as XML is read from the service's own public properties.
 	 */
-	private static void states(Object manager, String scope, String needle, List<String> lines) {
-		if (!(manager instanceof ComponentManagerImpl components)) {
+	private static void states(String className, String needle, List<String> lines) {
+		Class<?> type = load(className);
+		if (type == null) {
 			return;
 		}
-		// creates the matching services that are not created yet; a service may fail to create, as in its own use.
-		// Not for a short find, which would create most of them, each with its own startup work
-		if (needle.strip().length() >= MIN_CREATE) {
-			try {
-				Iterator<Object> created = components.instances(true, c -> isState(c) && named(c).toLowerCase(Locale.ROOT).contains(needle)).iterator();
-				while (created.hasNext()) {
-					created.next();
-				}
-			} catch (RuntimeException e) {
-				// list what can be listed
+		// a light service names its level, and asking the other one for it is an error; a registered one is just not there
+		Service light = type.getAnnotation(Service.class);
+		List<Service.Level> levels = light == null || light.value().length == 0 ? List.of(Service.Level.values()) : List.of(light.value());
+		// the application first: a project asked for an application service logs an error, while the application asked
+		// for a project service just has none
+		if (levels.contains(Service.Level.APP) && state(ApplicationManager.getApplication(), type, "app", needle, lines)) {
+			return;
+		}
+		if (levels.contains(Service.Level.PROJECT)) {
+			for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+				state(project, type, "project " + project.getName(), needle, lines);
 			}
 		}
-		for (Iterator<Object> it = components.instances(false, IdeSettings::isState).iterator(); it.hasNext(); ) {
-			Object component = it.next();
+	}
+
+	/** Adds the properties of {@code manager}'s service {@code type}; whether it has that service. */
+	private static boolean state(ComponentManager manager, Class<?> type, String scope, String needle, List<String> lines) {
+		Object service;
+		try {
+			service = manager.getService(type);
+		} catch (RuntimeException | LinkageError e) {
+			return false; // a service that cannot be created now
+		}
+		if (service instanceof PersistentStateComponent<?> component) {
 			try {
 				lines.addAll(properties(scope, component, needle));
 			} catch (RuntimeException | LinkageError e) {
 				// a state that cannot be read now is skipped
 			}
 		}
+		return service != null;
 	}
 
-	private static boolean isState(Class<?> c) {
-		return PersistentStateComponent.class.isAssignableFrom(c);
-	}
-
-	/** The class's simple name and its @State name. */
-	private static String named(Class<?> c) {
-		State state = c.getAnnotation(State.class);
-		return c.getSimpleName() + (state == null ? "" : " " + state.name());
+	/**
+	 * The platform's class of this name, or null. Not a plugin's: from 2026.2 every way to find a plugin, and so its
+	 * class loader, is internal.
+	 */
+	private static Class<?> load(String name) {
+		try {
+			return Class.forName(name, false, Registry.class.getClassLoader());
+		} catch (ClassNotFoundException | LinkageError e) {
+			return null;
+		}
 	}
 
 	private static List<String> properties(String scope, Object component, String needle) {

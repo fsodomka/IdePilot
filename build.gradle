@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.fsodomka.idepilot'
-version = '2026.1.0'
+version = '2026.1.1'
 
 repositories {
     mavenCentral()
@@ -43,12 +43,6 @@ intellijPlatform {
     pluginConfiguration.ideaVersion.untilBuild = provider { null }
 
     pluginVerification.ides.create('IU', providers.gradleProperty('platformVersion'))
-    // the default minus INTERNAL_API_USAGES: IdeSettings lists the registry, advanced settings and persistent states,
-    // which have no public counterpart
-    pluginVerification.failureLevel = [
-            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
-            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.OVERRIDE_ONLY_API_USAGES,
-    ]
     if (platformLocalPath.isPresent()) {
         pluginVerification.ides.local(platformLocalPath)
     }

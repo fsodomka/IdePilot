@@ -156,13 +156,16 @@ final class PilotTools {
 								+ "as ID – text – shortcut lines; groups are marked",
 						"limit", "integer", "Most actions find lists, default 50"),
 				tool("pilot_settings", "Effective values of IDE and project settings, defaults included (files hold only "
-								+ "changed values): registry keys, Advanced Settings (by ID or title), and the persisted state of "
-								+ "the IDE's and open projects' services, as SCOPE FILE Component.property = value, marked "
-								+ "(default) or (changed) where known. Searches the services already created, and creates those "
-								+ "whose class or state name contains find (of 4 or more characters). Settings page labels are not searched: find by "
-								+ "property name words, e.g. hotswap.",
+								+ "changed values), marked (default) or (changed) where known. find is one of: a part of a registry "
+								+ "key or value, listing registry KEY = VALUE; the exact ID of an Advanced Setting; or the class "
+								+ "name of a service with persisted state, e.g. com.intellij.ide.GeneralSettings, then maybe a dot "
+								+ "and a part of a property name (the platform's services only, not plugins'), listing the "
+								+ "application's and open projects' SCOPE FILE "
+								+ "Component.property = VALUE. Advanced Settings and services cannot be searched by a part of "
+								+ "their name, nor by a settings page's labels.",
 						List.of("find"),
-						"find", "string", "Text the setting's line contains (case-insensitive): key, component, property or value",
+						"find", "string", "A part of a registry key or value (case-insensitive), an Advanced Setting's ID, or a "
+								+ "service's class name, optionally with .PROPERTY",
 						"limit", "integer", "Most lines, default 50"),
 				tool("pilot_open", "Open a directory as a project, or a file in the editor (of the open project that "
 								+ "contains it), optionally at a line. Returns at once; follow with pilot_wait_for.",
