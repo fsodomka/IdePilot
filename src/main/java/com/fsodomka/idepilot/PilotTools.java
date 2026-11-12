@@ -114,7 +114,7 @@ final class PilotTools {
 								+ "consoles (their output), tests (test run results), tasks (background tasks), notifications, "
 								+ "errors (exceptions the IDE caught, the red balloon), freezes, or output (the IDE's stdout/stderr); "
 								+ "newest last.", List.of(),
-						"errors", "boolean", "Return the IDE's caught exceptions instead of the log; default false",
+						"errors", "boolean", "Return the exceptions the IDE caught since the plugin started instead of the log; default false",
 						"freezes", "boolean", "Return the newest UI freezes (threadDumps-freeze-* folders: date, time, "
 								+ "culprit, duration, and the UI thread's stack) instead of the log; lines is then the "
 								+ "number of freezes; default false",

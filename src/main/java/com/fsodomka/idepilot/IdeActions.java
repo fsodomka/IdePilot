@@ -19,8 +19,14 @@ import com.intellij.openapi.application.ModalityState;
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.fileEditor.OpenFileDescriptor;
-import com.intellij.openapi.progress.ProgressIndicator;
-import com.intellij.openapi.progress.impl.CoreProgressManager;
+import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer;
+import com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerEx;
+import com.intellij.ide.PowerSaveMode;
+import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.fileEditor.TextEditor;
+import com.intellij.psi.PsiDocumentManager;
+import com.intellij.psi.PsiFile;
 import com.intellij.openapi.roots.ProjectFileIndex;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -396,6 +402,32 @@ final class IdeActions {
 	/** The most a call waits: MCP clients (the TypeScript SDK's default) give up on a request after 60 s. */
 	static final double MAX_SECONDS = 50;
 
+	/**
+	 * The file of a showing editor whose highlighting has not finished, or null: it runs under no status bar progress,
+	 * and pilot_editor's problems tell to wait for idle. Only in the last focused frame, as the IDE leaves the editors
+	 * of its other frames unanalysed, and not in power save mode, where it analyses none.
+	 */
+	private static String analysed() {
+		return Edt.compute(() -> {
+			IdeFrame frame = IdeFocusManager.getGlobalInstance().getLastFocusedFrame();
+			Project project = frame == null ? null : frame.getProject();
+			if (project == null || project.isDisposed() || PowerSaveMode.isEnabled()) {
+				return null;
+			}
+			for (FileEditor fileEditor : FileEditorManager.getInstance(project).getSelectedEditors()) {
+				if (!(fileEditor instanceof TextEditor text) || !text.getComponent().isShowing()) {
+					continue;
+				}
+				PsiFile file = PsiDocumentManager.getInstance(project).getPsiFile(text.getEditor().getDocument());
+				if (file != null && DaemonCodeAnalyzer.getInstance(project).isHighlightingAvailable(file)
+						&& !DaemonCodeAnalyzerEx.getInstanceEx(project).isErrorAnalyzingFinished(file)) {
+					return file.getName();
+				}
+			}
+			return null;
+		});
+	}
+
 	/** What is still awaited, or null when nothing is; {@code marks} are where the consoles' old output ends. */
 	private static String missing(Wait wait, Map<Object, RunConsoles.Mark> marks) {
 		String text = wait.text();
@@ -408,11 +440,13 @@ final class IdeActions {
 			}
 		}
 		if (wait.idle()) {
-			for (ProgressIndicator indicator : CoreProgressManager.getCurrentIndicators()) {
-				if (indicator.isRunning() && !indicator.isCanceled()) {
-					String what = indicator.getText();
-					return "background task " + (what == null || what.isBlank() ? indicator.getClass().getSimpleName() : "\"" + what + "\"") + " is running";
-				}
+			List<BackgroundTasks.Task> running = BackgroundTasks.running();
+			if (!running.isEmpty()) {
+				return "background task " + UiSnapshot.quote(running.getFirst().title()) + " is running";
+			}
+			String analysed = analysed();
+			if (analysed != null) {
+				return analysed + " is still being analysed";
 			}
 		}
 		if (wait.task() != null) {

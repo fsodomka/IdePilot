@@ -91,7 +91,7 @@ final class UiEditor {
 			IntentionAction action = descriptor.getAction();
 			// the Alt+Enter list also offers the fixes of a problem elsewhere on the caret's line; like its popup, apply
 			// those at the problem, not at the caret (Insert ';' would go to the caret)
-			TextRange range = descriptor.getFixRange();
+			TextRange range = fixRange(project, document, editor.getCaretModel().getOffset(), action);
 			int fixOffset = range != null && !range.containsOffset(editor.getCaretModel().getOffset()) ? range.getStartOffset() : -1;
 			// later: the action may open a dialog or popup (rename, choose), which would block this request
 			ApplicationManager.getApplication().invokeLater(
@@ -183,6 +183,18 @@ final class UiEditor {
 		groups.put("inspection fix", List.copyOf(info.inspectionFixesToShow));
 		groups.put("intention", List.copyOf(info.intentionsToShow));
 		return groups;
+	}
+
+	/** Where the problem on the caret's line that offers {@code action} as its fix is; null for an intention. */
+	private static TextRange fixRange(Project project, Document document, int caret, IntentionAction action) {
+		int line = document.getLineNumber(caret);
+		TextRange[] found = new TextRange[1];
+		DaemonCodeAnalyzerEx.processHighlights(document, project, null, document.getLineStartOffset(line), document.getLineEndOffset(line),
+				(HighlightInfo info) -> {
+					found[0] = info.findRegisteredQuickFix((descriptor, range) -> descriptor.getAction() == action ? range : null);
+					return found[0] == null;
+				});
+		return found[0];
 	}
 
 	/** The action with exactly this text, else the only one equal ignoring case; else fails listing them. */

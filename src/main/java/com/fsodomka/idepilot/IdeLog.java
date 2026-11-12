@@ -1,7 +1,5 @@
 package com.fsodomka.idepilot;
 
-import com.intellij.diagnostic.AbstractMessage;
-import com.intellij.diagnostic.MessagePool;
 import com.intellij.notification.ActionCenter;
 import com.intellij.notification.Notification;
 import com.intellij.openapi.application.PathManager;
@@ -19,6 +17,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -36,19 +35,20 @@ final class IdeLog {
 	private IdeLog() {
 	}
 
-	/** The exceptions the IDE caught, read or not, each with the top of its stack trace. */
+	/** The exceptions the IDE caught since the plugin started, each with the top of its stack trace. */
 	static String errors(int count, String contains) {
 		String needle = contains == null ? null : contains.toLowerCase(Locale.ROOT);
 		List<String> errors = new ArrayList<>();
-		for (AbstractMessage message : MessagePool.getInstance().getFatalErrors(true, true)) {
-			String text = message.getThrowableText();
+		for (ErrorCapture.Entry entry : ErrorCapture.entries()) {
+			String text = entry.stack();
 			if (needle != null && !text.toLowerCase(Locale.ROOT).contains(needle)) {
 				continue;
 			}
 			String[] lines = text.split("\r?\n");
-			StringBuilder error = new StringBuilder().append(message.getDate()).append(message.isRead() ? "" : " (unread)");
-			if (message.getMessage() != null && !message.getMessage().isBlank()) {
-				error.append(' ').append(message.getMessage());
+			StringBuilder error = new StringBuilder().append(new Date(entry.millis()));
+			// an error logged without an exception gets one made of its message: do not say it twice
+			if (entry.message() != null && !entry.message().isBlank() && !lines[0].endsWith(entry.message())) {
+				error.append(' ').append(entry.message());
 			}
 			for (int i = 0; i < Math.min(lines.length, STACK_LINES); i++) {
 				error.append('\n').append(lines[i]);

@@ -43,7 +43,8 @@ intellijPlatform {
     pluginConfiguration.ideaVersion.untilBuild = provider { null }
 
     pluginVerification.ides.create('IU', providers.gradleProperty('platformVersion'))
-    // the default minus INTERNAL_API_USAGES: IdeLog reads MessagePool, which has no public counterpart
+    // the default minus INTERNAL_API_USAGES: IdeSettings lists the registry, advanced settings and persistent states,
+    // which have no public counterpart
     pluginVerification.failureLevel = [
             org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
             org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.OVERRIDE_ONLY_API_USAGES,
