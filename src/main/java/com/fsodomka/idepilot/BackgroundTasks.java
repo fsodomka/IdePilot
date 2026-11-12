@@ -1,10 +1,9 @@
 package com.fsodomka.idepilot;
 
 import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.ProgressModel;
 import com.intellij.openapi.progress.TaskInfo;
-import com.intellij.openapi.progress.impl.CoreProgressManager;
-import com.intellij.openapi.progress.util.ProgressWindow;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.Pair;
@@ -14,18 +13,19 @@ import com.intellij.openapi.wm.ex.StatusBarEx;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-/** The background tasks that run: those in the open projects' status bars, then any other progress (modal ones included). */
+/** The background tasks that run: those in the open projects' status bars, then a modal progress, if one runs. */
 final class BackgroundTasks {
+	static final String MODAL = "modal progress";
+
 	private BackgroundTasks() {
 	}
 
-	/** A running task; {@code fraction} is -1 when indeterminate, {@code project} null for progress outside a status bar. */
+	/** A running task; {@code fraction} is -1 when indeterminate, {@code project} null for a modal progress. */
 	record Task(String title, String text, String detail, double fraction, boolean cancellable, String project) {
 		boolean matches(String name) {
 			String lower = name.toLowerCase(Locale.ROOT);
@@ -69,14 +69,9 @@ final class BackgroundTasks {
 					}
 				}
 			}
-			// the status bar shows a delegate of a task's own indicator, so match those by title
-			Set<String> shown = new HashSet<>(tasks.stream().map(Task::title).toList());
-			for (ProgressIndicator indicator : CoreProgressManager.getCurrentIndicators()) {
-				String title = indicator instanceof ProgressWindow window ? window.getTitle() : null;
-				if (seen.add(indicator) && indicator.isRunning() && !indicator.isCanceled() && (title == null || !shown.contains(title))) {
-					tasks.add(task(firstNonBlank(title, firstNonBlank(indicator.getText(), indicator.getClass().getSimpleName())),
-							indicator.getText(), indicator.getText2(), indicator.isIndeterminate() ? -1 : indicator.getFraction(), false, null));
-				}
+			// a modal progress is in no status bar, and the public API tells only that one runs: pilot_snapshot shows its dialog
+			if (ProgressManager.getInstance().hasModalProgressIndicator()) {
+				tasks.add(task(MODAL, null, null, -1, false, null));
 			}
 			return tasks;
 		});

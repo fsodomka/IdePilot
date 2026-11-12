@@ -16,8 +16,8 @@ import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.JDOMExternalizable;
 import com.intellij.openapi.util.registry.Registry;
 import com.intellij.openapi.util.registry.RegistryValue;
-import com.intellij.serialization.MutableAccessor;
 import com.intellij.serviceContainer.ComponentManagerImpl;
+import com.intellij.util.xmlb.Accessor;
 import com.intellij.util.xmlb.XmlSerializerUtil;
 import org.jdom.Element;
 
@@ -147,7 +147,8 @@ final class IdeSettings {
 			return result;
 		}
 		Object defaults = bean == component ? null : fresh(bean.getClass());
-		for (MutableAccessor accessor : XmlSerializerUtil.getAccessors(bean.getClass())) {
+		// as Accessor: the list's own element type, MutableAccessor, is internal
+		for (Accessor accessor : XmlSerializerUtil.getAccessors(bean.getClass())) {
 			Object value = accessor.read(bean);
 			String line = scope + " " + file + name + "." + accessor.getName() + " = " + render(value);
 			if (defaults != null) {
