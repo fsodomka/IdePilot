@@ -94,7 +94,9 @@ final class UiClick {
 		try {
 			handled.get(CLICK_WAIT_MILLIS, TimeUnit.MILLISECONDS);
 		} catch (TimeoutException e) {
-			return "Clicked " + ref + "; still handling it after " + CLICK_WAIT_MILLIS + " ms (a modal dialog may be open)" + UiInput.heldNote();
+			String dialogs = UiSnapshot.modalDialogs();
+			return "Clicked " + ref + "; still handling it after " + CLICK_WAIT_MILLIS + " ms"
+					+ (dialogs.isEmpty() ? " (a modal dialog may be open)" : "; a modal dialog is open:\n" + dialogs) + UiInput.heldNote();
 		} catch (ExecutionException ignored) {
 			// the handlers' exception is the IDE's to report
 		} catch (InterruptedException e) {

@@ -1,23 +1,23 @@
 <!-- require-restart: the server, output capture and sync tracking start in appFrameCreated, which a dynamic load skips -->
 <idea-plugin require-restart="true">
     <id>com.fsodomka.idepilot</id>
-    <name>IDE Pilot</name>
+    <name>IDE Pilot MCP</name>
     <vendor>Frantisek Sodomka</vendor>
 
     <description><![CDATA[
-    <p><b>Playwright MCP for JetBrains IDEs.</b> An MCP (Model Context Protocol) server that lets AI agents such as
-    Claude Code, Codex, Gemini CLI and Cursor see and use the IDE's UI the way a user does: read windows, dialogs, trees,
-    tables and editors as a text tree, click, type, press shortcuts, run actions, and read logs, consoles and test
-    results.</p>
+    <p><b>IDE Pilot MCP lets AI agents see and use your IDE's UI like a user:</b> read windows, dialogs and editors,
+    click, type, run actions, and read consoles and test results. Playwright MCP for JetBrains IDEs: a Model Context
+    Protocol server for Claude Code, Codex, Gemini CLI, Cursor and other agents.</p>
     <p>Use it to test your plugin's UI end to end in the runIde sandbox, reproduce bug reports, check dialogs, settings
-    and quick fixes, or run tests and read their failures. It drives the UI, which makes it a good companion to
+    and quick fixes, run tests and read their failures, or rerun your running application after a change (or HotSwap it
+    into a debug session) and wait until its console says it started. It drives the UI, which makes it a good companion to
     code-level MCP servers.</p>
     <h3>Tools</h3>
     <ul>
-      <li><b>pilot_action</b> &ndash; runs an IDE action by ID and returns what it showed (hints, popups, dialogs, notifications), or finds actions by ID or menu text.</li>
+      <li><b>pilot_action</b> &ndash; runs an IDE action by ID, optionally in a Run/Debug tab by name, and returns what it showed (hints, popups, dialogs, notifications), or finds actions by ID or menu text.</li>
       <li><b>pilot_click</b> &ndash; clicks the component or row with a ref: left, middle or right button, double-click, with modifier keys; or hovers over it to show tooltips, or drags it onto another ref; optionally returns what it showed, as pilot_action does.</li>
       <li><b>pilot_editor</b> &ndash; reads an editor's text, caret and problems, moves its caret, and lists or applies its Alt+Enter actions.</li>
-      <li><b>pilot_evaluate</b> &ndash; runs a Groovy script inside the IDE.</li>
+      <li><b>pilot_evaluate</b> &ndash; runs a Groovy script inside the IDE, or in a running Java debug session with its JDI VirtualMachine bound.</li>
       <li><b>pilot_log</b> &ndash; the idea.log tail, the IDE's caught exceptions, recent UI freezes, notifications, stdout/stderr, or Run/Debug sessions (mode, state, process ID) and their console text, and Terminal tabs, or test run results (counts, failed tests with message and stack), by tab name or running only.</li>
       <li><b>pilot_open</b> &ndash; opens a project, or a file at a line.</li>
       <li><b>pilot_screenshot</b> &ndash; PNG of a component, or of the active window with its popups.</li>
@@ -42,5 +42,8 @@
     <extensions defaultExtensionNs="com.intellij">
         <applicationConfigurable parentId="tools" instance="com.fsodomka.idepilot.PilotConfigurable"
                                  id="com.fsodomka.idepilot" displayName="IDE Pilot"/>
+        <notificationGroup id="IDE Pilot" displayType="BALLOON"/>
+        <notificationGroup id="IDE Pilot security" displayType="BALLOON"/>
+        <errorHandler implementation="com.intellij.diagnostic.JetBrainsMarketplaceErrorReportSubmitter"/>
     </extensions>
 </idea-plugin>

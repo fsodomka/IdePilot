@@ -156,7 +156,7 @@ def main():
         raise AssertionError("a wrong token was accepted")
 
     step("initialize, tools/list")
-    client.rpc("initialize", {"protocolVersion": "2025-06-18"})
+    client.rpc("initialize", {"protocolVersion": "2025-06-18", "clientInfo": {"name": "idepilot-smoke", "version": "1.0"}})
     names = {tool["name"] for tool in client.rpc("tools/list")["tools"]}
     assert {"pilot_snapshot", "pilot_click", "pilot_type", "pilot_log", "pilot_action", "pilot_open",
             "pilot_wait_for", "pilot_evaluate", "pilot_screenshot", "pilot_window", "pilot_editor", "pilot_settings", "pilot_scroll"} <= names, names

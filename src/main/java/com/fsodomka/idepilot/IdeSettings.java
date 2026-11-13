@@ -10,7 +10,6 @@ import com.intellij.openapi.extensions.ExtensionPointName;
 import com.intellij.openapi.options.advanced.AdvancedSettings;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
-import com.intellij.openapi.util.JDOMExternalizable;
 import com.intellij.openapi.util.registry.Registry;
 import com.intellij.openapi.util.registry.RegistryKeyBean;
 import com.intellij.openapi.util.registry.RegistryValue;
@@ -190,7 +189,9 @@ final class IdeSettings {
 		String file = spec == null || spec.storages().length == 0 ? "" : spec.storages()[0].value() + " ";
 		Object bean = stateBean(component);
 		List<String> result = new ArrayList<>();
-		if (bean instanceof JDOMExternalizable) { // writes itself; the serializer refuses its accessors
+		// writes itself, and the serializer refuses its accessors; by name, as JDOMExternalizable is deprecated
+		Class<?> externalizable = load("com.intellij.openapi.util.JDOMExternalizable");
+		if (externalizable != null && externalizable.isInstance(bean)) {
 			return result;
 		}
 		Object defaults = bean == component ? null : fresh(bean.getClass());

@@ -3,6 +3,7 @@ package com.fsodomka.idepilot;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.junit.After;
 import org.junit.Test;
 
@@ -161,6 +162,16 @@ public class PilotServerTest {
 		JsonObject result = call("pilot_action", negative);
 		assertTrue(result.get("isError").getAsBoolean());
 		assertEquals("limit must be at least 1", text(result));
+	}
+
+	@Test
+	public void clientNameIgnoresFieldsThatAreNotStrings() {
+		assertEquals("An unnamed client", PilotServer.clientName(new JsonObject()));
+		JsonObject params = JsonParser.parseString(
+				"{\"clientInfo\": {\"name\": null, \"version\": {\"major\": 1}}}").getAsJsonObject();
+		assertEquals("An unnamed client", PilotServer.clientName(params));
+		params = JsonParser.parseString("{\"clientInfo\": {\"name\": \"claude-code\", \"version\": \"2.1\"}}").getAsJsonObject();
+		assertEquals("claude-code 2.1", PilotServer.clientName(params));
 	}
 
 	private static JsonObject call(String name, JsonObject arguments) {

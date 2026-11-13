@@ -150,8 +150,12 @@ final class PilotTools {
 						List.of(),
 						"id", "string", "Action ID to run",
 						"ref", "string", REF,
+						"session", "string", "Instead of ref, run in the context of the Run/Debug tab whose name contains this "
+								+ "(case-insensitive; of several, the running one), shown and selected first, e.g. id Rerun or Stop "
+								+ "with session Gugus; pilot_log sessions lists the tabs",
 						"wait", "number", "Seconds to watch for what the action shows, default 1; more for slow results "
-								+ "(e.g. 10 for Hotswap, which builds first), 0 to return at once; at most " + MAX,
+								+ "(e.g. 10 for Hotswap, which builds first), 0 to return at once (without the warning when the action "
+								+ "is disabled); at most " + MAX,
 						"find", "string", "List the actions whose ID or menu text contains this (case-insensitive), "
 								+ "as ID – text – shortcut lines; groups are marked",
 						"limit", "integer", "Most actions find lists, default 50"),
@@ -207,6 +211,10 @@ final class PilotTools {
 						List.of("script"),
 						"script", "string", "Groovy source; the value of the last expression is returned",
 						"ref", "string", REF + "; also runs the script in that component's dialog",
+						"session", "string", "Run on the debugger thread of the Java debug session whose name contains this "
+								+ "(case-insensitive), binding vm (the debuggee's JDI VirtualMachine, e.g. "
+								+ "vm.classesByName('a.B')[0].methods()), debugProcess and session; works while the program runs. The debugger waits for the script: "
+								+ "keep it short",
 						"timeout", "number", "Seconds to wait for the result, default 30, at most " + MAX),
 				tool("pilot_screenshot", "PNG of a component, or without ref of the active frame or dialog with its open popups "
 								+ "(Search Everywhere, completion, menus) and child dialogs. Painted by default, so it works while "
@@ -248,7 +256,7 @@ return result;
 						throw new IllegalArgumentException("Give id to run an action, or find to search for one");
 					}
 					if (id != null) {
-						yield IdeActions.run(id, string(arguments, "ref"), Math.min(number(arguments, "wait", 1), IdeActions.MAX_SECONDS));
+						yield IdeActions.run(id, string(arguments, "ref"), string(arguments, "session"), Math.min(number(arguments, "wait", 1), IdeActions.MAX_SECONDS));
 					}
 					yield IdeActions.find(find, limit(arguments));
 				}
@@ -257,7 +265,7 @@ return result;
 					yield IdeSettings.find(required(arguments, "find"), limit);
 				}
 				case "pilot_evaluate" -> Evaluator.eval(required(arguments, "script"), string(arguments, "ref"),
-						Math.min(number(arguments, "timeout", 30), IdeActions.MAX_SECONDS));
+						string(arguments, "session"), Math.min(number(arguments, "timeout", 30), IdeActions.MAX_SECONDS));
 				case "pilot_open" -> IdeActions.open(required(arguments, "path"),
 						arguments.has("line") ? arguments.get("line").getAsInt() : null);
 				case "pilot_wait_for" -> {

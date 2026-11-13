@@ -63,10 +63,63 @@ final class RunConsoles {
 				result.add(header + "\n(" + console.kind() + ", not readable)");
 				continue;
 			}
-			List<String> last = IdeLog.last(IdeLog.matching(List.of(console.text().split("\r?\n")), contains), lines);
+			// an empty console has no lines, not one empty line
+			List<String> all = console.text().isEmpty() ? List.of() : List.of(console.text().split("\r?\n"));
+			List<String> last = IdeLog.last(IdeLog.matching(all, contains), lines);
 			result.add(header + (last.isEmpty() ? "\n(no matching lines)" : "\n" + String.join("\n", last)));
 		}
 		return result.isEmpty() ? none("Run or Debug consoles", session, running) : String.join("\n\n", result);
+	}
+
+	/** A Run/Debug tab picked by name: the component to run its actions in, and the tab's name. */
+	record Tab(Component component, String title) {
+	}
+
+	/**
+	 * The Run/Debug tab whose name contains {@code session} (case-insensitive), selected and its tool window shown, so
+	 * actions run in its context (the platform skips an action whose context does not show). Of several, the running
+	 * one; fails when none matches or several running ones have different names. Call on the EDT.
+	 */
+	static Tab tab(String session) {
+		List<RunContentDescriptor> matching = new ArrayList<>();
+		Map<RunContentDescriptor, Project> projects = new IdentityHashMap<>();
+		for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+			for (RunContentDescriptor descriptor : RunContentManager.getInstance(project).getAllDescriptors()) {
+				if (named(descriptor.getDisplayName(), session)) {
+					matching.add(descriptor);
+					projects.put(descriptor, project);
+				}
+			}
+		}
+		if (matching.isEmpty()) {
+			throw new IllegalArgumentException(none("Run or Debug tabs", session, false) + "; pilot_log sessions lists them");
+		}
+		List<RunContentDescriptor> running = matching.stream()
+				.filter(d -> running(d.getProcessHandler())).toList();
+		List<RunContentDescriptor> candidates = running.isEmpty() ? matching : running;
+		List<String> names = candidates.stream().map(RunContentDescriptor::getDisplayName).distinct().toList();
+		if (names.size() > 1) {
+			throw new IllegalArgumentException("Several " + (running.isEmpty() ? "" : "running ") + "Run/Debug tabs are named like \""
+					+ session + "\": " + String.join(", ", names) + "; give more of the name");
+		}
+		RunContentDescriptor descriptor = candidates.getLast();
+		Project project = projects.get(descriptor);
+		RunContentManager manager = RunContentManager.getInstance(project);
+		ToolWindow window = manager.getToolWindowByDescriptor(descriptor);
+		if (window != null) {
+			window.show();
+		}
+		manager.selectRunContent(descriptor);
+		Component component = descriptor.getExecutionConsole() != null ? descriptor.getExecutionConsole().getComponent() : descriptor.getComponent();
+		if (component == null) {
+			throw new IllegalStateException("The tab " + descriptor.getDisplayName() + " has no component to run actions in");
+		}
+		return new Tab(component, descriptor.getDisplayName());
+	}
+
+	/** Whether {@code handler}'s process runs; stopping is not running: a rerun's old process stops for a while before the new one starts. */
+	static boolean running(ProcessHandler handler) {
+		return handler != null && !handler.isProcessTerminated() && !handler.isProcessTerminating();
 	}
 
 	/** Whether a tab's {@code title} contains {@code session} (case-insensitive); any tab when null. */
@@ -93,21 +146,28 @@ final class RunConsoles {
 
 	/**
 	 * Where a console's text ended. In a document, a range marker there, which the document moves left as the console
-	 * trims its start; otherwise its length and last characters, to find that end again after a trim.
+	 * trims its start; otherwise its length and last characters, to find that end again after a trim. {@code running}:
+	 * whether its process ran then; {@code whole}: all its text counts as new, unless that process stopped since
+	 * (see {@link #since(Console, Mark)}).
 	 */
-	record Mark(int length, String tail, RangeMarker end) {
+	record Mark(int length, String tail, RangeMarker end, boolean running, boolean whole) {
 		private static final int TAIL = 200;
 
 		static Mark of(String text) {
-			return new Mark(text.length(), text.substring(Math.max(0, text.length() - TAIL)), null);
+			return new Mark(text.length(), text.substring(Math.max(0, text.length() - TAIL)), null, false, false);
 		}
 
 		/** The end of {@code console}'s text now. Call on the EDT. */
 		static Mark of(Console console) {
 			Mark mark = of(console.text());
 			Document document = console.document();
-			return document == null ? mark : new Mark(mark.length(), mark.tail(),
-					document.createRangeMarker(document.getTextLength(), document.getTextLength()));
+			return new Mark(mark.length(), mark.tail(), document == null ? null
+					: document.createRangeMarker(document.getTextLength(), document.getTextLength()), console.running(), false);
+		}
+
+		/** This mark, with all the console's text counting as new while its process keeps running. */
+		Mark asWhole() {
+			return new Mark(length, tail, end, running, true);
 		}
 	}
 
@@ -118,15 +178,16 @@ final class RunConsoles {
 	 * Remembers where each console's text ends now, so that {@link #since} sees only what is written later. Called at
 	 * the start of each pilot call that may start a run; waits at most a second for the EDT, keeping the old marks
 	 * if it is busy or the marks cannot be taken. A console that appeared since the previous marks, likely started by
-	 * the call that made them, is marked at its start this once, so a call between starting a run and waiting for its
-	 * output does not hide what it printed so far.
+	 * the call that made them, counts in whole this once, so a call between starting a run and waiting for its output
+	 * does not hide what it printed so far; but not once its process, running now, stops: then this call likely
+	 * stopped or reran it, and its old output, such as a "Started" line, must not match.
 	 */
 	static void markConsoles() {
 		try {
 			Map<Object, Mark> previous = marks;
 			Map<Object, Mark> current = Edt.await(RunConsoles::currentMarks, ModalityState.any(), 1000, "EDT busy", e -> new IllegalStateException(e));
 			if (previous != null) {
-				current.replaceAll((descriptor, mark) -> previous.containsKey(descriptor) ? mark : Mark.of(""));
+				current.replaceAll((descriptor, mark) -> previous.containsKey(descriptor) ? mark : mark.asWhole());
 			}
 			marks = current;
 		} catch (RuntimeException e) {
@@ -148,6 +209,15 @@ final class RunConsoles {
 			}
 		}
 		return result;
+	}
+
+	/**
+	 * The part of {@code console}'s text written after {@code mark}; all of it for a {@link Mark#whole} mark, unless
+	 * its process ran at the mark and has stopped since.
+	 */
+	static String since(Console console, Mark mark) {
+		boolean whole = mark != null && mark.whole() && (console.running() || !mark.running());
+		return whole ? console.text() : since(console.text(), mark);
 	}
 
 	/**
@@ -191,7 +261,7 @@ final class RunConsoles {
 						console = wrapper.getDelegate();
 					}
 					ProcessHandler handler = descriptor.getProcessHandler();
-					boolean running = handler != null && !handler.isProcessTerminated();
+					boolean running = running(handler);
 					String text = null;
 					Document document = null;
 					if (console instanceof ConsoleViewImpl view) {
