@@ -1,8 +1,10 @@
 package com.fsodomka.idepilot;
 
+import com.intellij.execution.process.NopProcessHandler;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -38,6 +40,43 @@ public class WaitForTest {
 		assertEquals("fresh\n", RunConsoles.since("fresh\n", mark));
 		// marked while empty
 		assertEquals("first\n", RunConsoles.since("first\n", RunConsoles.Mark.of("")));
+	}
+
+	private static RunConsoles.Console console(boolean running, String text) {
+		return new RunConsoles.Console("run", "App", running, "", text, "ConsoleViewImpl", null);
+	}
+
+	@Test
+	public void buildActionsRefreshFirstOthersDoNot() {
+		for (String id : new String[] {"CompileDirty", "Compile", "CompileProject", "MakeModule", "BuildArtifact", "Hotswap", "HotSwapAction"}) {
+			assertTrue(id, IdeActions.builds(id));
+		}
+		for (String id : new String[] {"MakeStatic", "BuildMenu", "Bookmarks", "Rerun", "RebuildMenu", "ExpandAll"}) {
+			assertFalse(id, IdeActions.builds(id));
+		}
+	}
+
+	@Test
+	public void stoppingProcessIsNotRunning() {
+		NopProcessHandler handler = new NopProcessHandler();
+		handler.startNotify();
+		assertTrue(RunConsoles.running(handler));
+		handler.destroyProcess(); // a NopProcessHandler terminates at once; before it does, it is terminating
+		assertFalse(RunConsoles.running(handler));
+		assertFalse(RunConsoles.running(null));
+	}
+
+	@Test
+	public void wholeMarkCountsAllUnlessItsRunStoppedSince() {
+		String old = "booting\nStarted App\n";
+		RunConsoles.Mark running = RunConsoles.Mark.of(console(true, old)).asWhole();
+		// a run started by the call before the mark: all its output counts while it runs
+		assertEquals(old, RunConsoles.since(console(true, old), running));
+		// the marking call stopped it (a rerun): its old Started line must not match
+		assertEquals("", RunConsoles.since(console(false, old + "Process finished\n"), running).replace("Process finished\n", ""));
+		// it had ended before the mark: all its output still counts
+		RunConsoles.Mark ended = RunConsoles.Mark.of(console(false, old)).asWhole();
+		assertEquals(old, RunConsoles.since(console(false, old), ended));
 	}
 
 	@Test

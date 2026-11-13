@@ -30,6 +30,7 @@ import com.intellij.psi.PsiFile;
 import com.intellij.openapi.roots.ProjectFileIndex;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.startup.StartupManager;
 import com.intellij.openapi.project.Project;
@@ -49,8 +50,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /** Running actions by ID, and waiting for the UI or indexing. */
@@ -69,8 +74,33 @@ final class IdeActions {
 	 * {@code wait} seconds: returns the snapshot lines that showed meanwhile (hints, popups, dialogs; those gone again
 	 * marked so) and the notifications fired.
 	 */
-	static String run(String id, String ref, double wait) throws InterruptedException {
-		return watched(wait, ran -> start(id, ref, ran));
+	static String run(String id, String ref, String session, double wait) throws InterruptedException {
+		if (ref != null && session != null) {
+			throw new IllegalArgumentException("Give ref or session, not both");
+		}
+		String note = "";
+		if (builds(id)) {
+			// files changed on disk show in the IDE only after a refresh, which an inactive IDE does not do; builds would skip them.
+			// async: it schedules its VFS write in a write-safe context, which syncRefresh in invokeAndWait(any) is not
+			CountDownLatch refreshed = new CountDownLatch(1);
+			VirtualFileManager.getInstance().asyncRefresh(refreshed::countDown);
+			if (!refreshed.await(REFRESH_SECONDS, TimeUnit.SECONDS)) {
+				note = "\nNote: refreshing changed files did not finish within " + REFRESH_SECONDS + " s; the build may miss some";
+			}
+		}
+		// the warning is set when the action runs: with wait 0 the call returns before that, so it shows only with wait
+		AtomicReference<String> disabled = new AtomicReference<>("");
+		String result = watched(wait, ran -> start(id, ref, session, ran, disabled));
+		return result + note + disabled.get();
+	}
+
+	/** The IDs of actions that build: before them, changes on disk are refreshed into the IDE. */
+	private static final Pattern BUILDS = Pattern.compile("(?i)(Re)?(Compile|Build|HotSwap)\\w*|Make(Module|Project)");
+	private static final long REFRESH_SECONDS = 10;
+
+	/** Whether action {@code id} builds (Compile*, Build*, Rebuild*, MakeModule, Hotswap...), not e.g. MakeStatic or BuildMenu. */
+	static boolean builds(String id) {
+		return BUILDS.matcher(id).matches() && !id.endsWith("Menu");
 	}
 
 	/**
@@ -144,8 +174,12 @@ final class IdeActions {
 		return out.toString();
 	}
 
-	/** Queues action {@code id} in the context of {@code ref}, or of the focused component; sets {@code ran} as it starts. */
-	private static String start(String id, String ref, AtomicBoolean ran) {
+	/**
+	 * Queues action {@code id} in the context of {@code ref}, of the Run/Debug tab named like {@code session}, or of the
+	 * focused component; sets {@code ran} as it starts, and {@code disabled} to a warning when the action's update
+	 * disabled it there (it runs anyway).
+	 */
+	private static String start(String id, String ref, String session, AtomicBoolean ran, AtomicReference<String> disabled) {
 		ActionManager manager = ActionManager.getInstance();
 		AnAction action = manager.getAction(id);
 		if (action == null) {
@@ -154,7 +188,8 @@ final class IdeActions {
 					.filter(candidate -> candidate.toLowerCase(Locale.ROOT).contains(needle)).sorted().limit(SUGGESTIONS).toList();
 			throw new IllegalArgumentException("No action " + id + (similar.isEmpty() ? "" : "; similar: " + String.join(", ", similar)));
 		}
-		Component target = ref == null ? null : UiSnapshot.component(ref);
+		RunConsoles.Tab tab = session == null ? null : Edt.compute(() -> RunConsoles.tab(session));
+		Component target = ref != null ? UiSnapshot.component(ref) : tab != null ? tab.component() : null;
 		// later, not and-wait: the action may open a modal dialog, which would block this request
 		Component context = target != null ? target : KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
 		// the modality of the context's dialog: write-safe, yet runs while that dialog is open
@@ -166,11 +201,21 @@ final class IdeActions {
 					// project frame, so actions such as Hotswap find their project
 					IdeFrame frame = context == null ? showingFrame() : null;
 					Component data = frame != null ? frame.getComponent() : context;
-					ActionUtil.performAction(action, AnActionEvent.createEvent(DataManager.getInstance().getDataContext(data),
-							action.getTemplatePresentation().clone(), PLACE, ActionUiKind.NONE, null));
+					AnActionEvent event = AnActionEvent.createEvent(DataManager.getInstance().getDataContext(data),
+							action.getTemplatePresentation().clone(), PLACE, ActionUiKind.NONE, null);
+					// updateAction, not lastUpdateAndCheckDumb, which leaves a background-thread action (e.g. Stop) enabled
+					ActionUtil.updateAction(action, event);
+					if (!event.getPresentation().isEnabled()) {
+						disabled.set("\nWarning: " + id + " is disabled in this context, so it likely did nothing; "
+								+ "pass the ref of the component it acts on, or session for a Run/Debug tab's actions, or click its button");
+						// run anyway, as some actions' update is stricter than their action (e.g. ExpandAll on a collapsed tree)
+						event = AnActionEvent.createEvent(event.getDataContext(), action.getTemplatePresentation().clone(), PLACE,
+								ActionUiKind.NONE, null);
+					}
+					ActionUtil.performAction(action, event);
 				},
 				Edt.modality(context));
-		return "Ran " + id + (ref == null ? "" : " on " + ref);
+		return "Ran " + id + (ref != null ? " on " + ref : tab != null ? " in the Run/Debug tab " + UiSnapshot.quote(tab.title()) : "");
 	}
 
 	/**
@@ -362,7 +407,7 @@ final class IdeActions {
 		List<String> lines = new ArrayList<>();
 		for (RunConsoles.Console c : RunConsoles.consoleTexts(false)) {
 			if (c.isIn(wait.session()) && c.text() != null) {
-				RunConsoles.since(c.text(), marks.get(c.descriptor())).lines().filter(line -> line.contains(wait.console()))
+				RunConsoles.since(c, marks.get(c.descriptor())).lines().filter(line -> line.contains(wait.console()))
 						.map(line -> "- " + c.title() + ": " + abbreviate(line.strip()))
 						.forEach(lines::add);
 			}
@@ -456,7 +501,7 @@ final class IdeActions {
 			}
 		}
 		if (wait.console() != null && RunConsoles.consoleTexts(false).stream().noneMatch(c -> c.isIn(wait.session()) && c.text() != null
-				&& RunConsoles.since(c.text(), marks.get(c.descriptor())).contains(wait.console()))) {
+				&& RunConsoles.since(c, marks.get(c.descriptor())).contains(wait.console()))) {
 			return "\"" + wait.console() + "\" not in new output of a Run console"
 					+ (wait.session() == null ? "" : " named like \"" + wait.session() + "\"");
 		}

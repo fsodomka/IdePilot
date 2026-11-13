@@ -1,6 +1,7 @@
 package com.fsodomka.idepilot;
 
 import com.intellij.ide.DataManager;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.actionSystem.ActionUiKind;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.impl.InternalDecorator;
@@ -30,6 +31,7 @@ import javax.swing.tree.TreePath;
 import javax.swing.text.JTextComponent;
 import java.awt.Component;
 import java.awt.Container;
+import java.awt.Dialog;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.Window;
@@ -51,6 +53,35 @@ final class UiSnapshot {
 	private static final int MAX_TEXT = 80;
 	private static final int MAX_ROWS = 200;
 	private static final String COMPOSE_PANEL = "androidx.compose.ui.awt.ComposePanel";
+	private static final String PUSH_BUTTON = "push button";
+	private static final int MAX_DIALOG_LINES = 40;
+
+	/**
+	 * The showing modal dialogs, each with its components and refs, at most a few dozen lines; empty when none, or
+	 * when the EDT does not answer within half a second (busy rather than in a dialog's event loop).
+	 */
+	static String modalDialogs() {
+		try {
+			return Edt.await(UiSnapshot::modalDialogsNow, ModalityState.any(), MODAL_DIALOGS_MILLIS, "EDT busy", IllegalStateException::new);
+		} catch (IllegalStateException e) {
+			return "";
+		}
+	}
+
+	private static final long MODAL_DIALOGS_MILLIS = 500;
+
+	/** {@link #modalDialogs()}. Call on the EDT. */
+	private static String modalDialogsNow() {
+		Page page = new Page(0, MAX_DIALOG_LINES, false);
+		for (Window window : Window.getWindows()) {
+			if (window.isShowing() && window instanceof Dialog dialog && dialog.isModal()) {
+				page.add(0, "window " + quote(UiWindow.title(window)), new Target(window), UiWindow.windowStates(window));
+				children(window, 1, page);
+			}
+		}
+		return page.count == 0 ? "" : page.finish(null);
+	}
+
 	/** Each component's ref, kept while the component lives. */
 	private static final Map<Component, String> ids = new WeakHashMap<>();
 	private static final Map<String, Target> refs = new HashMap<>();
@@ -109,6 +140,7 @@ final class UiSnapshot {
 					break;
 				}
 				if (window.isShowing()) {
+					page.modal = window instanceof Dialog dialog && dialog.isModal();
 					page.add(0, "window " + quote(UiWindow.title(window)), new Target(window), UiWindow.windowStates(window));
 					if (!windowsOnly) {
 						children(window, 1, page);
@@ -179,6 +211,8 @@ final class UiSnapshot {
 		boolean allRows;
 		/** Add each line's class, and list the unnamed containers of plugin classes that are otherwise flattened. */
 		boolean classes;
+		/** Whether the window being walked is a modal dialog: with find, its buttons are listed once a line in it matched. */
+		boolean modal;
 		private final List<String> rows = new ArrayList<>();
 
 		void add(int depth, String text, Target target, String states) {
@@ -191,7 +225,9 @@ final class UiSnapshot {
 			}
 			Line line = new Line(depth, text, target, states);
 			path.add(line);
-			if ((text + states).toLowerCase(Locale.ROOT).contains(find)) {
+			// in a modal dialog with a match, its buttons too: they are what one acts on (those after the match)
+			boolean button = modal && path.getFirst().listed && text.startsWith(PUSH_BUTTON);
+			if (button || (text + states).toLowerCase(Locale.ROOT).contains(find)) {
 				for (Line l : path) {
 					if (!l.listed) {
 						l.listed = true;

@@ -1,16 +1,20 @@
-# IDE Pilot
+# IDE Pilot MCP
 
-**Playwright MCP for JetBrains IDEs.** IDE Pilot is a Model Context Protocol (MCP) server inside IntelliJ IDEA,
-PyCharm, WebStorm, GoLand and other JetBrains IDEs that lets AI agents (Claude Code, Codex, Gemini CLI, Cursor) see
-and use the IDE's UI the way a user does. It reads windows, dialogs, tool windows, trees, tables and editors as a text
-tree with refs. It clicks, types, presses shortcuts and runs actions. It reads logs, consoles, test results, freezes
-and settings.
+**IDE Pilot MCP lets AI agents see and use your IDE's UI like a user:** read windows, dialogs and editors, click,
+type, run actions, and read consoles and test results.
+
+Playwright MCP for JetBrains IDEs: a Model Context Protocol (MCP) server inside IntelliJ IDEA, PyCharm, WebStorm,
+GoLand and other JetBrains IDEs, for Claude Code, Codex, Gemini CLI, Cursor and other agents. It reads windows,
+dialogs, tool windows, trees, tables and editors as a text tree with refs. It clicks, types, presses shortcuts and runs
+actions. It reads logs, consoles, test results, freezes and settings.
 
 Use it to:
 - test a plugin's UI end to end in the `runIde` sandbox, and let the agent reload its own changes
 - reproduce a bug report step by step and capture what the IDE showed
 - check that dialogs, settings pages, inspections and quick fixes behave as intended
 - run tests or a debug session and read the failures and console output
+- rerun a running application after a change (or HotSwap it into a debug session) and wait until its console says it
+  started, e.g. `pilot_action id: Rerun, session: MyApp`, then `pilot_wait_for console: "Started MyApplication"`
 
 IDE Pilot drives the **UI**. Code-level MCP servers, such as JetBrains' built-in one, navigate and edit code; the two
 work well side by side.
@@ -19,10 +23,10 @@ work well side by side.
 
 | Tool | What it does |
 |---|---|
-| `pilot_action` | Runs an IDE action by ID (`ShowSettings`, `GotoFile`), in a ref's context; an unknown ID lists similar ones. Then watches the UI for `wait` seconds (default 1) and returns what showed meanwhile (hints, popups, dialogs, with refs) and the notifications fired, e.g. HotSwap's result with `id: Hotswap, wait: 10`. `find` lists actions by ID or menu text, with shortcuts. |
+| `pilot_action` | Runs an IDE action by ID (`ShowSettings`, `GotoFile`), in a ref's context, or with `session` in the Run/Debug tab named like it (e.g. `id: Rerun, session: Gugus`); an unknown ID lists similar ones, and an action disabled in that context runs with a warning. Then watches the UI for `wait` seconds (default 1) and returns what showed meanwhile (hints, popups, dialogs, with refs) and the notifications fired, e.g. HotSwap's result with `id: Hotswap, wait: 10`. `find` lists actions by ID or menu text, with shortcuts. |
 | `pilot_click` | Clicks the component or row with a ref; `button: right` opens context menus, `clickCount: 2` double-clicks, `modifiers` (`ctrl shift`) holds keys; `hover: true` shows tooltips and hover popups, `to: <ref>` drags onto another ref. `wait` (seconds, default 0) then watches the UI and returns what showed meanwhile, as `pilot_action` does, e.g. the context menu of a right-click or the Debug tool window of a Debug button. |
 | `pilot_editor` | Reads an editor: file, caret, selection and numbered text (`lines`); `problems` lists its errors and warnings; `actions` lists the Alt+Enter actions at the caret (`caret: 12:5` moves it and focuses the editor, so later actions run there), and `apply` runs one by name, at its problem when that is elsewhere on the line. |
-| `pilot_evaluate` | Runs a Groovy script inside the IDE with `project` and `component` bound, and returns its result. |
+| `pilot_evaluate` | Runs a Groovy script inside the IDE with `project` and `component` bound, and returns its result. With `session`, runs it on the debugger thread of that Java debug session, while the program runs, with `vm` (the debuggee's JDI VirtualMachine), `debugProcess` and `session` bound, e.g. `vm.instanceCounts(vm.classesByName('a.B'))`. |
 | `pilot_log` | What the IDE and its runs report: the tail of `idea.log` (filtered with `contains`), the IDE's caught exceptions (`errors`), the latest UI freezes with the UI thread's stack (`freezes`), notifications (`notifications`), the IDE's stdout/stderr since the plugin started (`output`), the Run/Debug sessions (`sessions`: mode, running, paused or terminated with exit code, process ID and start time), or their consoles' text (`consoles`, Terminal tabs included as `Terminal: <tab>`), or test run results (`tests`: counts, then failed tests with message and stack, or tests matching `contains`); pick tabs by name with `session`, or only `running` ones. |
 | `pilot_open` | Opens a directory as a project, or a file in the editor at a line. |
 | `pilot_screenshot` | PNG of a component, or of the active window with its popups; `mode: screen` copies the screen pixels. |
