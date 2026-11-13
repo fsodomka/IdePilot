@@ -37,7 +37,7 @@ final class Screenshot {
 	}
 
 	static Shot take(String ref, String path, boolean popups, boolean screen) {
-		Component target = ref == null ? null : UiSnapshot.component(ref);
+		Component target = ref == null ? null : UiRefs.component(ref);
 		Object result = Edt.compute(() -> {
 			Component component = target != null ? target : topWindow(activeWindow());
 			Component painted = component instanceof RootPaneContainer container ? container.getRootPane() : component;

@@ -161,7 +161,7 @@ final class UiWindow {
 	 * {@code window} is, when it is floating or windowed; null if none.
 	 */
 	private static ToolWindow toolWindow(String ref, Window window) {
-		Component component = ref == null ? KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner() : UiSnapshot.component(ref);
+		Component component = ref == null ? KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner() : UiRefs.component(ref);
 		if (component != null && !(component instanceof Window)) {
 			ToolWindow found = toolWindowOf(component);
 			if (found != null) {
@@ -225,7 +225,7 @@ final class UiWindow {
 			}
 			return active;
 		}
-		Component component = UiSnapshot.component(ref);
+		Component component = UiRefs.component(ref);
 		Window window = component instanceof Window w ? w : SwingUtilities.getWindowAncestor(component);
 		if (window == null) {
 			throw new IllegalArgumentException(ref + " is in no window");

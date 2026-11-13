@@ -30,7 +30,7 @@ final class UiScroll {
 		if ((direction == null) == (to == null)) {
 			throw new IllegalArgumentException("Give direction or to");
 		}
-		Component component = UiSnapshot.component(ref);
+		Component component = UiRefs.component(ref);
 		return Edt.compute(() -> to != null ? scrollTo(component, to) : scrollBy(component, direction.toLowerCase(Locale.ROOT), pages));
 	}
 

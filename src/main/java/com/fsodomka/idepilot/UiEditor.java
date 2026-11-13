@@ -45,7 +45,7 @@ final class UiEditor {
 	}
 
 	static String editor(Request request) {
-		Component component = request.ref() == null ? null : UiSnapshot.component(request.ref());
+		Component component = request.ref() == null ? null : UiRefs.component(request.ref());
 		// write-safe in the editor's modality: moving the caret and applying a fix change the editor
 		return Edt.await(() -> run(component, request), Edt.modality(component), 30_000,
 				"No result after 30 s; a dialog may block the editor",

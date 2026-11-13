@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -159,7 +160,7 @@ def main():
     client.rpc("initialize", {"protocolVersion": "2025-06-18", "clientInfo": {"name": "idepilot-smoke", "version": "1.0"}})
     names = {tool["name"] for tool in client.rpc("tools/list")["tools"]}
     assert {"pilot_snapshot", "pilot_click", "pilot_type", "pilot_log", "pilot_action", "pilot_open",
-            "pilot_wait_for", "pilot_evaluate", "pilot_screenshot", "pilot_window", "pilot_editor", "pilot_settings", "pilot_scroll"} <= names, names
+            "pilot_wait_for", "pilot_evaluate", "pilot_screenshot", "pilot_window", "pilot_editor", "pilot_settings", "pilot_scroll", "pilot_memory"} <= names, names
 
     step("wait for smart mode")
     client.call("pilot_wait_for", smart=True, timeout=300)
@@ -225,7 +226,7 @@ def run_in_project(client, project):
              test_hover, test_drag_tabs, test_editor, test_synchronize, test_compose, test_scroll, test_hold_release,
              test_type_newline, test_window, test_snapshot_classes, test_tool_window_and_settings, test_screenshot,
              test_log, test_consoles, test_log_tests, test_settings, test_table, test_click_process_mouse_event, test_popup_checked, test_settled, test_tasks,
-             test_terminal, test_no_ide_errors)
+             test_terminal, test_memory_path, test_memory_growth, test_no_ide_errors)
     # stops at the first failure, since the tests after it would fail on the state it left
     for i, test in enumerate(tests):
         start = time.monotonic()
@@ -262,6 +263,12 @@ def test_evaluate(client, project):
     # with the window's ref: without one, the focused project, which after a sandbox restart may still be another one
     text = client.text("pilot_evaluate", script="project.basePath", ref=project_window_ref(client, project))
     assert os.path.normcase(os.path.normpath(text.strip())) == os.path.normcase(os.path.normpath(project)), text
+    step("memory without a session")
+    # the smoke project has no Java program running: only that the session is looked up and its absence reported
+    text = client.fail("pilot_memory", session="idepilot-smoke-none")
+    assert "Run or Debug tabs" in text, text
+    text = client.fail("pilot_memory", session="idepilot-smoke-none", op="path", **{"class": "a.B"})
+    assert "Run or Debug tabs" in text, text
 
 
 def test_project_view(client, project):
@@ -997,6 +1004,152 @@ def test_terminal(client, project):
     assert marker in text.splitlines(), text
     text = client.text("pilot_log", sessions=True, session="terminal")
     assert re.match(r"Terminal: .+ \(Terminal tab, (running|exited|state unknown)\)$", text.splitlines()[0]), text
+
+
+SLEEP_JAVA = """public class Sleep {
+	static final class Held {
+	}
+
+	static final Object HELD = new Held();
+	static final Held[] ALL = {};
+
+	public static void main(String[] args) throws Exception {
+		System.out.println("sleeping");
+		Thread.sleep(120_000);
+	}
+}
+"""
+
+
+def test_memory_path(client, project):
+    step("memory path: a heap dump of a running Java program, read for what holds an object")
+    # the IDE runtime's java runs a one-file program, so the throwaway project needs no JDK; its jcmd dumps the heap
+    source_dir = tempfile.mkdtemp(prefix="idepilot-smoke-java")
+    source = os.path.join(source_dir, "Sleep.java")
+    with open(source, "w", encoding="utf-8") as f:
+        f.write(SLEEP_JAVA)
+    title = "IdePilot memory"
+    heap_dirs = ("def tmp = new File(System.getProperty('java.io.tmpdir')); "
+                 "(tmp.listFiles() ?: []).findAll { it.name.startsWith('idepilot-heap') }.size()")
+    before = int(client.text("pilot_evaluate", script=heap_dirs).strip())
+    client.call("pilot_evaluate", script=f"""
+        def java = new File(System.getProperty('java.home'), com.intellij.openapi.util.SystemInfo.isWindows ? 'bin/java.exe' : 'bin/java')
+        new com.intellij.execution.RunContentExecutor(project, new com.intellij.execution.process.OSProcessHandler(
+            new com.intellij.execution.configurations.GeneralCommandLine(java.path, {json.dumps(source)}))).withTitle('{title}').run()
+        null""")
+    try:
+        wait_for_console(client, title, "sleeping")
+        # a Run tab, not a debug session: counts come from jcmd's class histogram
+        text = client.text("pilot_memory", session=title, filter="Sleep", timeout=40)
+        assert "\n1\tSleep$Held" in text, text
+        text = client.text("pilot_memory", session=title, op="baseline", hideJdk=True, timeout=40)
+        assert text.startswith("Baseline taken: ") and "\tjava." not in text, text
+        text = client.text("pilot_memory", session=title, op="diff", filter="Sleep", timeout=40)
+        assert text.startswith("No class grew since the baseline"), text
+        text = client.text("pilot_memory", session=title, op="path", timeout=40, **{"class": "Sleep$Held[]"})
+        assert "\nWhat holds Sleep$Held[] objects, as COUNT HOLDER, most first:\n1\tstatic Sleep.ALL" in text, text
+        text = client.text("pilot_memory", session=title, op="path", timeout=40, **{"class": "Sleep$Held"})
+        assert text.startswith("Sleep$Held\n  <- static Sleep.HELD\n"), text
+        assert "heap dump of" in text, text
+        after = int(client.text("pilot_evaluate", script=heap_dirs).strip())
+        assert after == before, f"the heap dump was left behind: {after - before} more idepilot-heap directories"
+    finally:
+        client.call("pilot_evaluate", script=f"""
+            com.intellij.execution.ui.RunContentManager.getInstance(project).allDescriptors
+                .findAll {{ it.displayName == '{title}' }}.each {{ it.processHandler?.destroyProcess() }}
+            null""")
+        poll(lambda: client.text("pilot_log", sessions=True, session=title), lambda text: "running" not in text)
+        shutil.rmtree(source_dir, ignore_errors=True)
+
+
+GROW_JAVA = """import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Grow {
+	static final class Leaked {
+	}
+
+	static final List<Leaked> LEAKED = new ArrayList<>();
+
+	public static void main(String[] args) throws Exception {
+		System.out.println("ready");
+		BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
+		while (in.readLine() != null) {
+			for (int i = 0; i < 50; i++) {
+				LEAKED.add(new Leaked());
+			}
+			System.out.println("leaked " + LEAKED.size());
+		}
+	}
+}
+"""
+
+
+def test_memory_growth(client, project):
+    step("memory baseline and diff: growth by the number of repeats, in a Run tab and in a debug session")
+    source_dir = tempfile.mkdtemp(prefix="idepilot-smoke-java")
+    source = os.path.join(source_dir, "Grow.java")
+    with open(source, "w", encoding="utf-8") as f:
+        f.write(GROW_JAVA)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    # names no one contains another, since a session is picked by a part of its name
+    prefix = "IdePilot growth"
+    run_title, jdwp_title, debug_title = f"{prefix} run", f"{prefix} jdwp", f"{prefix} debug"
+    jdwp = f"-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:{port}"
+    for title, options in ((run_title, []), (jdwp_title, [jdwp])):
+        client.call("pilot_evaluate", script=f"""
+            def java = new File(System.getProperty('java.home'), com.intellij.openapi.util.SystemInfo.isWindows ? 'bin/java.exe' : 'bin/java')
+            new com.intellij.execution.RunContentExecutor(project, new com.intellij.execution.process.OSProcessHandler(
+                new com.intellij.execution.configurations.GeneralCommandLine([java.path] + {json.dumps(options)} + [{json.dumps(source)}]))).withTitle('{title}').run()
+            null""")
+
+    def leak(title, size):
+        # a line on the program's stdin leaks 50 more objects
+        client.call("pilot_evaluate", script=f"""
+            def handler = com.intellij.execution.ui.RunContentManager.getInstance(project).allDescriptors
+                .find {{ it.displayName == '{title}' }}.processHandler
+            handler.processInput.write('leak\\n'.bytes)
+            handler.processInput.flush()
+            null""")
+        wait_for_console(client, title, f"leaked {size}")
+
+    def grows(session, tab):
+        client.text("pilot_memory", session=session, op="baseline", filter="Grow", timeout=40)
+        leak(tab, 50)
+        leak(tab, 100)
+        text = client.text("pilot_memory", session=session, op="diff", filter="Grow", timeout=40)
+        assert "\n+100\t100\tGrow$Leaked" in text, text
+
+    try:
+        wait_for_console(client, run_title, "ready")
+        start = time.monotonic()
+        grows(run_title, run_title)
+        print(f"  Run tab (jcmd): {time.monotonic() - start:.1f} s", flush=True)
+        wait_for_console(client, jdwp_title, "ready")
+        client.call("pilot_evaluate", script=f"""
+            def type = com.intellij.execution.remote.RemoteConfigurationType.getInstance()
+            def settings = com.intellij.execution.RunManager.getInstance(project).createConfiguration('{debug_title}', type.factory)
+            settings.configuration.with {{ HOST = '127.0.0.1'; PORT = '{port}'; SERVER_MODE = false; USE_SOCKET_TRANSPORT = true }}
+            com.intellij.execution.ProgramRunnerUtil.executeConfiguration(settings,
+                com.intellij.execution.executors.DefaultDebugExecutor.getDebugExecutorInstance())
+            null""")
+        poll(lambda: client.text("pilot_log", sessions=True, session=debug_title), lambda t: "running" in t, tries=50)
+        start = time.monotonic()
+        grows(debug_title, jdwp_title)
+        print(f"  debug session (JDI): {time.monotonic() - start:.1f} s", flush=True)
+    finally:
+        client.call("pilot_evaluate", script=f"""
+            com.intellij.xdebugger.XDebuggerManager.getInstance(project).debugSessions
+                .findAll {{ it.sessionName == '{debug_title}' }}.each {{ it.stop() }}
+            com.intellij.execution.ui.RunContentManager.getInstance(project).allDescriptors
+                .findAll {{ it.displayName.startsWith('{prefix}') }}.each {{ it.processHandler?.destroyProcess() }}
+            null""")
+        poll(lambda: client.text("pilot_log", sessions=True, session=prefix), lambda text: "running" not in text)
+        shutil.rmtree(source_dir, ignore_errors=True)
 
 
 def test_no_ide_errors(client, project):

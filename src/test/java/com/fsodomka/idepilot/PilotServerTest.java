@@ -68,7 +68,7 @@ public class PilotServerTest {
 			assertEquals("object", t.getAsJsonObject("inputSchema").get("type").getAsString());
 		}
 		assertEquals(Set.of("pilot_snapshot", "pilot_click", "pilot_type", "pilot_log", "pilot_action", "pilot_open",
-				"pilot_wait_for", "pilot_evaluate", "pilot_screenshot", "pilot_window", "pilot_editor", "pilot_settings", "pilot_scroll"), names);
+				"pilot_wait_for", "pilot_evaluate", "pilot_screenshot", "pilot_window", "pilot_editor", "pilot_settings", "pilot_scroll", "pilot_memory"), names);
 		JsonObject click = tools.asList().stream().map(JsonElement::getAsJsonObject)
 				.filter(t -> t.get("name").getAsString().equals("pilot_click")).findFirst().orElseThrow();
 		assertEquals("ref", click.getAsJsonObject("inputSchema").getAsJsonArray("required").get(0).getAsString());

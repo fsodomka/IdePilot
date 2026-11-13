@@ -15,7 +15,6 @@ import com.intellij.openapi.actionSystem.impl.ActionButton;
 import com.intellij.openapi.util.text.StringUtil;
 
 import javax.accessibility.Accessible;
-import javax.accessibility.AccessibleComponent;
 import javax.accessibility.AccessibleContext;
 import javax.accessibility.AccessibleRole;
 import javax.accessibility.AccessibleState;
@@ -36,12 +35,7 @@ import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.Window;
 import java.lang.ref.WeakReference;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.WeakHashMap;
 
 /**
  * The visible Swing UI as an indented tree like Playwright's snapshot. Unnamed containers are flattened into their
@@ -53,7 +47,6 @@ final class UiSnapshot {
 	private static final int MAX_TEXT = 80;
 	private static final int MAX_ROWS = 200;
 	private static final String COMPOSE_PANEL = "androidx.compose.ui.awt.ComposePanel";
-	private static final String PUSH_BUTTON = "push button";
 	private static final int MAX_DIALOG_LINES = 40;
 
 	/**
@@ -72,50 +65,14 @@ final class UiSnapshot {
 
 	/** {@link #modalDialogs()}. Call on the EDT. */
 	private static String modalDialogsNow() {
-		Page page = new Page(0, MAX_DIALOG_LINES, false);
+		SnapshotPage page = new SnapshotPage(0, MAX_DIALOG_LINES, false);
 		for (Window window : Window.getWindows()) {
 			if (window.isShowing() && window instanceof Dialog dialog && dialog.isModal()) {
-				page.add(0, "window " + quote(UiWindow.title(window)), new Target(window), UiWindow.windowStates(window));
+				page.add(0, "window " + quote(UiWindow.title(window)), new UiRefs.Target(window), UiWindow.windowStates(window));
 				children(window, 1, page);
 			}
 		}
 		return page.count == 0 ? "" : page.finish(null);
-	}
-
-	/** Each component's ref, kept while the component lives. */
-	private static final Map<Component, String> ids = new WeakHashMap<>();
-	private static final Map<String, Target> refs = new HashMap<>();
-	private static int lastId;
-
-	/**
-	 * What a ref points at: a component, or with {@code row} >= 0 a row of a list, tree or table, whose {@code item} (the
-	 * list value or tree node) or, for a table, {@code text} (the row's rendered text, held strongly, as table values are
-	 * often made on each call) tells whether the row still shows it.
-	 */
-	record Target(WeakReference<Component> component, int row, WeakReference<Object> item, String text) {
-		Target(Component component) {
-			this(new WeakReference<>(component), -1, null, null);
-		}
-
-		/** Whether a row target's row still shows its item (a Compose node: is still showing); true for a component. Call on the EDT. */
-		boolean rowCurrent() {
-			if (row < 0) {
-				return true;
-			}
-			Component owner = component.get();
-			if (owner instanceof JTable table) {
-				return row < table.getRowCount() && tableRowText(table, row).equals(text);
-			}
-			Object expected = item.get();
-			if (owner != null && isCompose(owner) && expected instanceof Accessible node) {
-				AccessibleContext context = node.getAccessibleContext();
-				return context != null && context.getAccessibleStateSet() != null
-						&& context.getAccessibleStateSet().contains(AccessibleState.SHOWING);
-			}
-			Object actual = owner instanceof JList<?> list ? row < list.getModel().getSize() ? list.getModel().getElementAt(row) : null
-					: owner instanceof JTree tree && tree.getPathForRow(row) != null ? tree.getPathForRow(row).getLastPathComponent() : null;
-			return expected != null && expected.equals(actual);
-		}
 	}
 
 	private UiSnapshot() {
@@ -130,9 +87,9 @@ final class UiSnapshot {
 			boolean classes) {
 		return Edt.compute(() -> {
 			if (offset == 0) {
-				refs.values().removeIf(target -> target.component().get() == null);
+				UiRefs.prune();
 			}
-			Page page = new Page(offset, Math.max(limit, 1), bounds, find, toon);
+			SnapshotPage page = new SnapshotPage(offset, Math.max(limit, 1), bounds, find, toon);
 			page.allRows = allRows;
 			page.classes = classes;
 			for (Window window : Window.getWindows()) {
@@ -141,7 +98,7 @@ final class UiSnapshot {
 				}
 				if (window.isShowing()) {
 					page.modal = window instanceof Dialog dialog && dialog.isModal();
-					page.add(0, "window " + quote(UiWindow.title(window)), new Target(window), UiWindow.windowStates(window));
+					page.add(0, "window " + quote(UiWindow.title(window)), new UiRefs.Target(window), UiWindow.windowStates(window));
 					if (!windowsOnly) {
 						children(window, 1, page);
 					}
@@ -152,211 +109,18 @@ final class UiSnapshot {
 		});
 	}
 
-	private static String ref(Target target) {
-		Component component = target.component().get();
-		String id = ids.computeIfAbsent(component, c -> "e" + ++lastId);
-		return target.row() < 0 ? id : id + "." + target.row();
-	}
-
-	/** One page of snapshot lines; {@code full} once a line past the page was reached, whose ref is {@code nextRef}. */
-	static final class Page {
-		final int offset;
-		final int limit;
-		final StringBuilder out = new StringBuilder();
-		int count;
-		boolean full;
-		String first;
-		String nextRef;
-
-		final boolean bounds;
-		/** With find, only the lines containing it (case-insensitive) and their ancestors are listed. */
-		final String find;
-		/** The ancestors of the current line and the line itself, each listed once when a line below them matches. */
-		private final List<Line> path = new ArrayList<>();
-
-		private static final class Line {
-			final int depth;
-			final String text;
-			final Target target;
-			final String states;
-			boolean listed;
-
-			Line(int depth, String text, Target target, String states) {
-				this.depth = depth;
-				this.text = text;
-				this.target = target;
-				this.states = states;
-			}
-		}
-
-		Page(int offset, int limit, boolean bounds) {
-			this(offset, limit, bounds, null);
-		}
-
-		Page(int offset, int limit, boolean bounds, String find) {
-			this(offset, limit, bounds, find, false);
-		}
-
-		Page(int offset, int limit, boolean bounds, String find, boolean toon) {
-			this.offset = offset;
-			this.limit = limit;
-			this.bounds = bounds;
-			this.find = find == null || find.isEmpty() ? null : find.toLowerCase(Locale.ROOT);
-			this.toon = toon;
-		}
-
-		/** With toon, the page is a TOON table of lines instead of an indented tree. */
-		final boolean toon;
-		/** List every row of lists and trees (at most {@link #MAX_ROWS}), not only those that show. */
-		boolean allRows;
-		/** Add each line's class, and list the unnamed containers of plugin classes that are otherwise flattened. */
-		boolean classes;
-		/** Whether the window being walked is a modal dialog: with find, its buttons are listed once a line in it matched. */
-		boolean modal;
-		private final List<String> rows = new ArrayList<>();
-
-		void add(int depth, String text, Target target, String states) {
-			if (find == null) {
-				list(depth, text, target, states);
-				return;
-			}
-			while (!path.isEmpty() && path.getLast().depth >= depth) {
-				path.removeLast();
-			}
-			Line line = new Line(depth, text, target, states);
-			path.add(line);
-			// in a modal dialog with a match, its buttons too: they are what one acts on (those after the match)
-			boolean button = modal && path.getFirst().listed && text.startsWith(PUSH_BUTTON);
-			if (button || (text + states).toLowerCase(Locale.ROOT).contains(find)) {
-				for (Line l : path) {
-					if (!l.listed) {
-						l.listed = true;
-						list(l.depth, l.text, l.target, l.states);
-					}
-				}
-			}
-		}
-
-		private void list(int depth, String text, Target target, String states) {
-			if (full) {
-				return;
-			}
-			if (++count > offset + limit) {
-				full = true;
-				nextRef = ref(target);
-				return;
-			}
-			if (count > offset) {
-				String ref = ref(target);
-				refs.put(ref, target);
-				if (first == null) {
-					first = ref;
-				}
-				if (toon) {
-					rows.add(toonRow(depth, ref, text, states, bounds ? screenRect(target) : null));
-				} else {
-					out.repeat("  ", depth).append("- ").append(text).append(" [ref=").append(ref).append(']').append(states).append(bounds ? screenBounds(target) : "").append('\n');
-				}
-			}
-		}
-
-		/** depth,ref,role,name,states[,x,y,w,h]; text is role or role "name", as {@link #quote} writes it. */
-		private String toonRow(int depth, String ref, String text, String states, Rectangle r) {
-			int at = text.indexOf(" \"");
-			String role = at < 0 || !text.endsWith("\"") ? text : text.substring(0, at);
-			String name = role.equals(text) ? "" : text.substring(at + 2, text.length() - 1).replace("\\\"", "\"");
-			// " (focused) (selected)" -> "focused selected"
-			String stateList = states.replace(") (", " ").replace(" (", "").replace(")", "").strip();
-			StringBuilder row = new StringBuilder().append(depth).append(',').append(Toon.value(ref)).append(',')
-					.append(Toon.value(role)).append(',').append(Toon.value(name)).append(',').append(Toon.value(stateList));
-			if (bounds) {
-				row.append(',').append(r == null ? "null,null,null,null" : r.x + "," + r.y + "," + r.width + "," + r.height);
-			}
-			return row.toString();
-		}
-
-		/**
-		 * The page's text, ending with the next page's offset and ref when full. Given the previous page's
-		 * {@code next} ref, fails when this page does not start with it: the UI changed in between.
-		 */
-		String finish(String next) {
-			if (next != null && offset > 0 && !next.equals(first)) {
-				throw new IllegalStateException("The UI changed since the previous page (line " + (offset + 1) + " is "
-						+ (first == null ? "gone" : first) + ", not " + next + "); take a new pilot_snapshot from offset 0");
-			}
-			if (toon) {
-				StringBuilder table = new StringBuilder("lines[").append(rows.size()).append("]{depth,ref,role,name,states")
-						.append(bounds ? ",x,y,w,h" : "").append("}:\n");
-				for (String row : rows) {
-					table.append("  ").append(row).append('\n');
-				}
-				if (full) {
-					table.append("nextOffset: ").append(offset + limit).append('\n').append("next: ").append(nextRef).append('\n');
-				}
-				return table.toString();
-			}
-			if (full) {
-				out.append("- ... more: pilot_snapshot offset=").append(offset + limit).append(" next=").append(nextRef)
-						.append(find == null ? "" : " with the same find").append('\n');
-			}
-			if (out.isEmpty()) {
-				return offset > 0 ? "(no more lines)" : find != null ? "(no line contains \"" + find + "\")" : "(no visible windows)";
-			}
-			return out.toString();
-		}
-	}
-
 	/** All visible text: the names of the windows, components and rows a snapshot would list. Call on the EDT. */
 	static String text() {
 		// it registers the refs it lists, and pilot_wait_for calls it every poll
-		refs.values().removeIf(target -> target.component().get() == null);
-		Page page = new Page(0, Integer.MAX_VALUE - 1, false);
+		UiRefs.prune();
+		SnapshotPage page = new SnapshotPage(0, Integer.MAX_VALUE - 1, false);
 		for (Window window : Window.getWindows()) {
 			if (window.isShowing()) {
-				page.add(0, "window " + quote(UiWindow.title(window)), new Target(window), "");
+				page.add(0, "window " + quote(UiWindow.title(window)), new UiRefs.Target(window), "");
 				children(window, 1, page);
 			}
 		}
 		return page.out.toString();
-	}
-
-	/** " @x,y wxh" in screen coordinates, of the row for a row. */
-	private static String screenBounds(Target target) {
-		Rectangle r = screenRect(target);
-		return r == null ? "" : " @" + r.x + "," + r.y + " " + r.width + "x" + r.height;
-	}
-
-	/** The bounds in screen coordinates, of the row for a row; null when not shown. */
-	private static Rectangle screenRect(Target target) {
-		Component component = target.component().get();
-		if (component == null || !component.isShowing()) {
-			return null;
-		}
-		Rectangle r = target.row() < 0 ? new Rectangle(0, 0, component.getWidth(), component.getHeight()) : rowBounds(component, target);
-		if (r == null) {
-			return null;
-		}
-		Point origin = component.getLocationOnScreen();
-		return new Rectangle(origin.x + r.x, origin.y + r.y, r.width, r.height);
-	}
-
-	/**
-	 * A row target's bounds in its owner's coordinates: a list or tree row's cell, or a Compose node's bounds (which
-	 * Compose reports relative to its panel); null for a component or a row no longer shown. Call on the EDT.
-	 */
-	static Rectangle rowBounds(Component owner, Target target) {
-		if (target.row() < 0) {
-			return null;
-		}
-		if (isCompose(owner) && target.item().get() instanceof Accessible node) {
-			AccessibleContext context = node.getAccessibleContext();
-			AccessibleComponent shown = context == null ? null : context.getAccessibleComponent();
-			return shown == null ? null : shown.getBounds();
-		}
-		return owner instanceof JList<?> list ? list.getCellBounds(target.row(), target.row())
-				: owner instanceof JTree tree ? tree.getRowBounds(target.row())
-				: owner instanceof JTable table && target.row() < table.getRowCount() && table.getColumnCount() > 0
-				? table.getCellRect(target.row(), 0, true).union(table.getCellRect(target.row(), table.getColumnCount() - 1, true)) : null;
 	}
 
 	/** Whether the component is a Compose for Desktop panel, whose content shows only through its accessible tree. */
@@ -364,41 +128,7 @@ final class UiSnapshot {
 		return component.getClass().getName().equals(COMPOSE_PANEL);
 	}
 
-	/** The component of {@code ref}, for a row its list or tree. Resolved on the EDT, which owns {@link #refs}. */
-	static Component component(String ref) {
-		return Edt.compute(() -> resolve(ref));
-	}
-
-	/** {@link #component}'s lookup; call on the EDT. */
-	private static Component resolve(String ref) {
-		if (ref == null) {
-			throw new IllegalArgumentException("ref is required");
-		}
-		Target target = refs.get(ref);
-		Component component = target == null ? null : target.component().get();
-		if (component == null) {
-			throw new IllegalArgumentException("No component " + ref + "; take a new pilot_snapshot");
-		}
-		if (!component.isShowing()) {
-			throw new IllegalArgumentException(ref + " is no longer shown; take a new pilot_snapshot");
-		}
-		return component;
-	}
-
-	/** The component of {@code ref} with its target, for a row checked to still show its item. */
-	static Map.Entry<Component, Target> resolveRow(String ref) {
-		// one lookup on the EDT, so the target and its component agree; resolve fails first when the ref is stale
-		return Edt.compute(() -> {
-			Component owner = resolve(ref);
-			Target found = refs.get(ref);
-			if (!found.rowCurrent()) {
-				throw new IllegalArgumentException(ref + " no longer shows the same row; take a new pilot_snapshot");
-			}
-			return Map.entry(owner, found);
-		});
-	}
-
-	private static void children(Container container, int depth, Page page) {
+	private static void children(Container container, int depth, SnapshotPage page) {
 		for (Component child : container.getComponents()) {
 			if (page.full) {
 				return;
@@ -414,7 +144,7 @@ final class UiSnapshot {
 					|| !(child instanceof Container c && c.getComponentCount() > 0 && isGeneric(role));
 			int childDepth = depth;
 			if (listed) {
-				page.add(depth, name.isEmpty() ? role : role + " " + quote(name), new Target(child),
+				page.add(depth, name.isEmpty() ? role : role + " " + quote(name), new UiRefs.Target(child),
 						states(child) + (page.classes ? " (class " + className(child) + ")" : ""));
 				childDepth++;
 				switch (child) {
@@ -438,7 +168,7 @@ final class UiSnapshot {
 	 * The showing nodes of a Compose panel's accessible tree, as rows of the panel numbered in walk order; unnamed
 	 * generic nodes are flattened into their children, as unnamed Swing containers are.
 	 */
-	private static void composeNodes(Component panel, AccessibleContext context, int depth, Page page, int[] index) {
+	private static void composeNodes(Component panel, AccessibleContext context, int depth, SnapshotPage page, int[] index) {
 		if (context == null) {
 			return;
 		}
@@ -458,7 +188,7 @@ final class UiSnapshot {
 			int childDepth = depth;
 			if (showing && (!name.isEmpty() || child.getAccessibleChildrenCount() == 0 || !isGeneric(role))) {
 				page.add(depth, name.isEmpty() ? role : role + " " + quote(name),
-						new Target(new WeakReference<>(panel), index[0]++, new WeakReference<>(node), null), states(set));
+						new UiRefs.Target(new WeakReference<>(panel), index[0]++, new WeakReference<>(node), null), states(set));
 				childDepth++;
 			}
 			composeNodes(panel, child, childDepth, page, index);
@@ -482,7 +212,7 @@ final class UiSnapshot {
 		return states.toString();
 	}
 
-	private static void listRows(JList<?> list, int depth, Page page) {
+	private static void listRows(JList<?> list, int depth, SnapshotPage page) {
 		int shownFirst = list.getFirstVisibleIndex(), shownLast = list.getLastVisibleIndex();
 		int count = list.getModel().getSize();
 		int[] range = rowRange(count, shownFirst, shownLast, page.allRows);
@@ -538,7 +268,7 @@ final class UiSnapshot {
 				: rendererText(tree.getCellRenderer().getTreeCellRendererComponent(tree, node, tree.isRowSelected(i), tree.isExpanded(i), leaf, i, false));
 	}
 
-	private static void treeRows(JTree tree, int depth, Page page) {
+	private static void treeRows(JTree tree, int depth, SnapshotPage page) {
 		Rectangle visible = tree.getVisibleRect();
 		int shownFirst = tree.getClosestRowForLocation(visible.x, visible.y);
 		int shownLast = tree.getClosestRowForLocation(visible.x, visible.y + visible.height - 1);
@@ -559,7 +289,7 @@ final class UiSnapshot {
 		}
 	}
 
-	private static void tableRows(JTable table, int depth, Page page) {
+	private static void tableRows(JTable table, int depth, SnapshotPage page) {
 		Rectangle visible = table.getVisibleRect();
 		int count = table.getRowCount();
 		int shownFirst = count == 0 ? -1 : table.rowAtPoint(new Point(visible.x, visible.y));
@@ -587,8 +317,8 @@ final class UiSnapshot {
 		return StringUtil.shortenTextWithEllipsis(text.toString(), MAX_TEXT, 0);
 	}
 
-	private static void row(Component owner, int row, Object item, String role, String text, String states, int depth, Page page) {
-		page.add(depth, role + " " + quote(text), new Target(new WeakReference<>(owner), row, new WeakReference<>(item),
+	private static void row(Component owner, int row, Object item, String role, String text, String states, int depth, SnapshotPage page) {
+		page.add(depth, role + " " + quote(text), new UiRefs.Target(new WeakReference<>(owner), row, new WeakReference<>(item),
 				owner instanceof JTable ? text : null), states);
 	}
 
