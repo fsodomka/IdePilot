@@ -15,7 +15,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 /** Runs code on the EDT and waits for its result. */
-final class Edt {
+public final class Edt {
 	private Edt() {
 	}
 
@@ -23,7 +23,7 @@ final class Edt {
 	 * {@code task}'s result, computed on the EDT in any modality. A RuntimeException it throws is rethrown as is,
 	 * not wrapped as invokeAndWait would.
 	 */
-	static <T> T compute(Supplier<T> task) {
+	public static <T> T compute(Supplier<T> task) {
 		AtomicReference<T> result = new AtomicReference<>();
 		AtomicReference<RuntimeException> failure = new AtomicReference<>();
 		ApplicationManager.getApplication().invokeAndWait(() -> {

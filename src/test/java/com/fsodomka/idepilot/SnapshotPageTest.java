@@ -13,11 +13,11 @@ import static org.junit.Assert.assertTrue;
 
 /** Paging and the "UI changed" check, over plain components, as headless tests have no windows. */
 public class SnapshotPageTest {
-	private final List<UiSnapshot.Target> targets = new ArrayList<>();
+	private final List<UiRefs.Target> targets = new ArrayList<>();
 
 	{
 		for (int i = 0; i < 5; i++) {
-			targets.add(new UiSnapshot.Target(new JPanel()));
+			targets.add(new UiRefs.Target(new JPanel()));
 		}
 	}
 
@@ -36,8 +36,8 @@ public class SnapshotPageTest {
 		assertArrayEquals(new int[]{0, 199}, UiSnapshot.rowRange(500, -1, -1, true));
 	}
 
-	private UiSnapshot.Page page(int offset, int limit) {
-		UiSnapshot.Page page = new UiSnapshot.Page(offset, limit, false);
+	private SnapshotPage page(int offset, int limit) {
+		SnapshotPage page = new SnapshotPage(offset, limit, false);
 		for (int i = 0; i < targets.size(); i++) {
 			page.add(1, "panel \"p" + i + "\"", targets.get(i), "");
 		}
@@ -46,7 +46,7 @@ public class SnapshotPageTest {
 
 	@Test
 	public void firstPageEndsWithNextOffsetAndRef() {
-		UiSnapshot.Page first = page(0, 2);
+		SnapshotPage first = page(0, 2);
 		String text = first.finish(null);
 		String[] lines = text.split("\n");
 		assertEquals(3, lines.length);
@@ -73,16 +73,16 @@ public class SnapshotPageTest {
 	@Test
 	public void pastTheEnd() {
 		assertEquals("(no more lines)", page(5, 2).finish(null));
-		assertEquals("(no visible windows)", new UiSnapshot.Page(0, 2, false).finish(null));
+		assertEquals("(no visible windows)", new SnapshotPage(0, 2, false).finish(null));
 	}
 
 	@Test
 	public void findListsMatchesUnderTheirAncestorsOnce() {
-		UiSnapshot.Target[] t = new UiSnapshot.Target[6];
+		UiRefs.Target[] t = new UiRefs.Target[6];
 		for (int i = 0; i < t.length; i++) {
-			t[i] = new UiSnapshot.Target(new JPanel());
+			t[i] = new UiRefs.Target(new JPanel());
 		}
-		UiSnapshot.Page page = new UiSnapshot.Page(0, 100, false, "OK");
+		SnapshotPage page = new SnapshotPage(0, 100, false, "OK");
 		page.add(0, "window \"Settings\"", t[0], "");
 		page.add(1, "panel \"Left\"", t[1], "");
 		page.add(2, "push button \"Cancel\"", t[2], "");
@@ -99,18 +99,18 @@ public class SnapshotPageTest {
 
 	@Test
 	public void findMatchesStatesAndPages() {
-		UiSnapshot.Page first = new UiSnapshot.Page(0, 1, false, "(focused)");
+		SnapshotPage first = new SnapshotPage(0, 1, false, "(focused)");
 		first.add(0, "window \"w\"", targets.get(0), "");
 		first.add(1, "text \"a\"", targets.get(1), " (focused)");
 		String text = first.finish(null);
 		assertTrue(text, text.startsWith("- window \"w\""));
 		assertTrue(text, text.contains("offset=1 next=" + first.nextRef + " with the same find"));
-		assertEquals("(no line contains \"nothing\")", new UiSnapshot.Page(0, 5, false, "nothing").finish(null));
+		assertEquals("(no line contains \"nothing\")", new SnapshotPage(0, 5, false, "nothing").finish(null));
 	}
 
 	/** A window with two panels, each holding a matching and a non-matching button. */
-	private UiSnapshot.Page findPage(int offset, int limit, List<UiSnapshot.Target> t) {
-		UiSnapshot.Page page = new UiSnapshot.Page(offset, limit, false, "ok");
+	private SnapshotPage findPage(int offset, int limit, List<UiRefs.Target> t) {
+		SnapshotPage page = new SnapshotPage(offset, limit, false, "ok");
 		page.add(0, "window \"w\"", t.get(0), "");
 		page.add(1, "panel \"A\"", t.get(1), "");
 		page.add(2, "push button \"OK a\"", t.get(2), "");
@@ -123,12 +123,12 @@ public class SnapshotPageTest {
 
 	@Test
 	public void findPagesThroughMatchesAndTheirAncestors() {
-		List<UiSnapshot.Target> t = new ArrayList<>();
+		List<UiRefs.Target> t = new ArrayList<>();
 		for (int i = 0; i < 7; i++) {
-			t.add(new UiSnapshot.Target(new JPanel()));
+			t.add(new UiRefs.Target(new JPanel()));
 		}
 		// listed lines: window, panel A, OK a, panel B, OK b; page 1 breaks between OK a and panel B
-		UiSnapshot.Page first = findPage(0, 3, t);
+		SnapshotPage first = findPage(0, 3, t);
 		String one = first.finish(null);
 		assertTrue(one, one.contains("\"OK a\"") && !one.contains("panel \"B\""));
 		String two = findPage(3, 3, t).finish(first.nextRef);
@@ -141,7 +141,7 @@ public class SnapshotPageTest {
 	@Test
 	public void uiChangedFails() {
 		String next = page(0, 2).nextRef;
-		targets.add(0, new UiSnapshot.Target(new JPanel())); // a component appeared above the page
+		targets.add(0, new UiRefs.Target(new JPanel())); // a component appeared above the page
 		IllegalStateException e = assertThrows(IllegalStateException.class, () -> page(2, 2).finish(next));
 		assertTrue(e.getMessage(), e.getMessage().contains("The UI changed since the previous page (line 3 is "));
 		assertTrue(e.getMessage(), e.getMessage().contains("not " + next));

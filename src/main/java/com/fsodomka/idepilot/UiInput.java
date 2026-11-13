@@ -68,7 +68,7 @@ final class UiInput {
 		if ((up & ~(before | down)) != 0) {
 			throw new IllegalArgumentException("Not held: " + release + (before == 0 ? "; nothing is held" : ""));
 		}
-		Map.Entry<Component, UiSnapshot.Target> resolved = ref == null ? null : UiSnapshot.resolveRow(ref);
+		Map.Entry<Component, UiRefs.Target> resolved = ref == null ? null : UiRefs.resolveRow(ref);
 		Component target = resolved == null ? null : resolved.getKey();
 		// a Compose node: its panel takes the focus, then the node within it, through its accessible component
 		Object item = resolved == null || resolved.getValue().item() == null ? null : resolved.getValue().item().get();

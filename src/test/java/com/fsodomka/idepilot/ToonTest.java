@@ -32,11 +32,11 @@ public class ToonTest {
 
 	@Test
 	public void pageAsToonTable() {
-		UiSnapshot.Page page = new UiSnapshot.Page(0, 2, false, null, true);
-		UiSnapshot.Target window = new UiSnapshot.Target(new JPanel());
+		SnapshotPage page = new SnapshotPage(0, 2, false, null, true);
+		UiRefs.Target window = new UiRefs.Target(new JPanel());
 		page.add(0, "window \"Say \\\"hi\\\", C:\"", window, " (active)");
-		page.add(1, "scroll bar", new UiSnapshot.Target(new JPanel()), " (focused) (selected)");
-		page.add(1, "panel \"more\"", new UiSnapshot.Target(new JPanel()), "");
+		page.add(1, "scroll bar", new UiRefs.Target(new JPanel()), " (focused) (selected)");
+		page.add(1, "panel \"more\"", new UiRefs.Target(new JPanel()), "");
 		String[] lines = page.finish(null).split("\n");
 		assertEquals("lines[2]{depth,ref,role,name,states}:", lines[0]);
 		assertTrue(lines[1], lines[1].matches("  0,e\\d+,window,\"Say \\\\\"hi\\\\\", C:\",active"));
@@ -47,6 +47,6 @@ public class ToonTest {
 
 	@Test
 	public void emptyToonPage() {
-		assertEquals("lines[0]{depth,ref,role,name,states}:\n", new UiSnapshot.Page(0, 5, false, "nothing", true).finish(null));
+		assertEquals("lines[0]{depth,ref,role,name,states}:\n", new SnapshotPage(0, 5, false, "nothing", true).finish(null));
 	}
 }

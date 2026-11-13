@@ -10,20 +10,20 @@ import static org.junit.Assert.assertTrue;
 
 /** pilot_wait_for's checks that need no running IDE: arguments and a plain time wait. */
 public class WaitForTest {
-	private static IdeActions.Wait time(double seconds) {
-		return new IdeActions.Wait(null, null, false, false, null, false, false, null, null, seconds);
+	private static WaitFor.Wait time(double seconds) {
+		return new WaitFor.Wait(null, null, false, false, null, false, false, null, null, seconds);
 	}
 
 	@Test
 	public void timePastTheMostACallWaitsFails() {
-		IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> IdeActions.waitFor(time(55), 80));
+		IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> WaitFor.until(time(55), 80));
 		assertTrue(e.getMessage(), e.getMessage().contains("several calls"));
 	}
 
 	@Test
 	public void sessionWithoutConsoleFails() {
 		assertThrows(IllegalArgumentException.class,
-				() -> IdeActions.waitFor(new IdeActions.Wait(null, null, false, false, null, false, false, null, "app", 0.1), 1));
+				() -> WaitFor.until(new WaitFor.Wait(null, null, false, false, null, false, false, null, "app", 0.1), 1));
 	}
 
 	@Test
@@ -81,24 +81,24 @@ public class WaitForTest {
 
 	@Test
 	public void firstChangeNamesANewLineElseSaysOneWent() {
-		assertEquals("- label \"75%\" [ref=e2]", IdeActions.firstChange("- window\n  - label \"50%\" [ref=e2]", "- window\n  - label \"75%\" [ref=e2]"));
-		assertEquals("a line went", IdeActions.firstChange("- window\n- label", "- window"));
+		assertEquals("- label \"75%\" [ref=e2]", WaitFor.firstChange("- window\n  - label \"50%\" [ref=e2]", "- window\n  - label \"75%\" [ref=e2]"));
+		assertEquals("a line went", WaitFor.firstChange("- window\n- label", "- window"));
 	}
 
 	@Test
 	public void nothingToWaitForFails() {
-		assertThrows(IllegalArgumentException.class, () -> IdeActions.waitFor(time(0), 10));
+		assertThrows(IllegalArgumentException.class, () -> WaitFor.until(time(0), 10));
 	}
 
 	@Test
 	public void timePastTheTimeoutFails() {
-		assertThrows(IllegalArgumentException.class, () -> IdeActions.waitFor(time(5), 1));
+		assertThrows(IllegalArgumentException.class, () -> WaitFor.until(time(5), 1));
 	}
 
 	@Test
 	public void timeWaitsAtLeastThatLong() throws InterruptedException {
 		long start = System.nanoTime();
-		String result = IdeActions.waitFor(time(0.3), 5);
+		String result = WaitFor.until(time(0.3), 5);
 		double elapsed = (System.nanoTime() - start) / 1e9;
 		assertTrue(result, result.startsWith("Done after"));
 		assertTrue("waited " + elapsed + " s", elapsed >= 0.3 && elapsed < 1);

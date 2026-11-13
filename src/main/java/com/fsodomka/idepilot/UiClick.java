@@ -64,9 +64,9 @@ final class UiClick {
 		// the platform's popup trigger: the press on macOS and Linux, the release on Windows
 		boolean popupOnPress = awtButton == MouseEvent.BUTTON3 && !SystemInfo.isWindows;
 		boolean popupOnRelease = awtButton == MouseEvent.BUTTON3 && SystemInfo.isWindows;
-		Map.Entry<Component, UiSnapshot.Target> resolved = UiSnapshot.resolveRow(ref);
+		Map.Entry<Component, UiRefs.Target> resolved = UiRefs.resolveRow(ref);
 		Component component = resolved.getKey();
-		UiSnapshot.Target target = resolved.getValue();
+		UiRefs.Target target = resolved.getValue();
 		CompletableFuture<Void> handled = new CompletableFuture<>();
 		// later, not and-wait: the click may open a modal dialog, which would block this request
 		ApplicationManager.getApplication().invokeLater(() -> {
@@ -109,7 +109,7 @@ final class UiClick {
 	@SuppressWarnings("MagicConstant") // mask combines InputEvent *_DOWN_MASK flags from modifiers()
 	static String hover(String ref, String modifiers) {
 		int mask = modifiers(modifiers) | UiInput.held();
-		Map.Entry<Component, UiSnapshot.Target> resolved = UiSnapshot.resolveRow(ref);
+		Map.Entry<Component, UiRefs.Target> resolved = UiRefs.resolveRow(ref);
 		Component component = resolved.getKey();
 		ApplicationManager.getApplication().invokeLater(() -> {
 			Map.Entry<Component, Point> hit = hit(component, resolved.getValue());
@@ -133,8 +133,8 @@ final class UiClick {
 	static String drag(String ref, String to, String button, String modifiers) {
 		int awtButton = button(button);
 		int mask = modifiers(modifiers) | UiInput.held();
-		Map.Entry<Component, UiSnapshot.Target> from = UiSnapshot.resolveRow(ref);
-		Map.Entry<Component, UiSnapshot.Target> onto = UiSnapshot.resolveRow(to);
+		Map.Entry<Component, UiRefs.Target> from = UiRefs.resolveRow(ref);
+		Map.Entry<Component, UiRefs.Target> onto = UiRefs.resolveRow(to);
 		Component source = from.getKey();
 		ApplicationManager.getApplication().invokeLater(() -> {
 			Map.Entry<Component, Point> hit = hit(source, from.getValue());
@@ -174,17 +174,17 @@ final class UiClick {
 	}
 
 	/** The component and point mouse events at the ref's center go to; null if it is no longer showing. Call on the EDT. */
-	private static Map.Entry<Component, Point> hit(Component component, UiSnapshot.Target target) {
+	private static Map.Entry<Component, Point> hit(Component component, UiRefs.Target target) {
 		Point at = center(component, target);
 		return at == null ? null : under(component, at);
 	}
 
 	/** The center of the ref's row cell, or of the component; null if it is no longer showing. Call on the EDT. */
-	private static Point center(Component component, UiSnapshot.Target target) {
+	private static Point center(Component component, UiRefs.Target target) {
 		if (!component.isShowing()) {
 			return null;
 		}
-		Rectangle cell = UiSnapshot.rowBounds(component, target);
+		Rectangle cell = UiRefs.rowBounds(component, target);
 		if (cell != null && component instanceof JComponent owner && !owner.getVisibleRect().contains(cell)) {
 			owner.scrollRectToVisible(cell); // an offscreen row from a snapshot with allRows; its bounds stay put
 		}

@@ -1,8 +1,10 @@
 package com.fsodomka.idepilot;
 
+import com.fsodomka.idepilot.memory.DebuggeeMemory;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.intellij.openapi.diagnostic.Logger;
 
 import java.util.Base64;
 import java.util.List;
@@ -11,6 +13,7 @@ import java.util.function.Supplier;
 
 /** The MCP tools: their schemas for tools/list and their calls for tools/call. */
 final class PilotTools {
+	private static final Logger LOG = Logger.getInstance(PilotTools.class);
 	private static final Gson GSON = new Gson();
 
 	private PilotTools() {
@@ -216,6 +219,26 @@ final class PilotTools {
 								+ "vm.classesByName('a.B')[0].methods()), debugProcess and session; works while the program runs. The debugger waits for the script: "
 								+ "keep it short",
 						"timeout", "number", "Seconds to wait for the result, default 30, at most " + MAX),
+				tool("pilot_memory", "Heap of a running Java program: live instances per class and their growth since a "
+								+ "baseline, and the chain of references keeping an instance alive (from a heap dump). Works in a "
+								+ "Java debug session (counts without pausing it) or a Run tab of a local Java process (counts from "
+								+ "jcmd's class histogram, after a full GC that briefly pauses it). To find a leak: op baseline, repeat the "
+								+ "suspected action N times (pilot_action, pilot_click), op diff (classes grown by about N), then op "
+								+ "path with one of them: the field at the end of the chain holds it. Counts include only live objects.",
+						List.of("session"),
+						"session", "string", "The Run or Debug tab of a local Java process whose name contains this "
+								+ "(case-insensitive); pilot_log sessions lists them",
+						"op", "string", "counts (default): most instances per class; baseline: remember the counts; diff: classes "
+								+ "grown since the baseline; path: the shortest chain of references from a GC root (a static field, a "
+								+ "thread's local variable) to an instance of class, from a heap dump taken with jcmd (a second "
+								+ "or so per 200 MB of heap; the program pauses for the dump); for an array class such as byte[], "
+								+ "also the fields holding most of its arrays",
+						"class", "string", "With op path, the binary class name, e.g. com.a.Session, com.a.Outer$Inner or byte[]",
+						"filter", "string", "Only classes whose name contains this (case-insensitive), e.g. com.mycompany",
+						"hideJdk", "boolean", "Leave out the JDK's classes (java., javax., jdk., sun., com.sun.) and arrays of them, "
+								+ "also from path's holders; primitive arrays stay. Default false",
+						"limit", "integer", "Most classes listed, default 20",
+						"timeout", "number", "Seconds to wait, default 30, at most " + MAX + "; the debugger waits too"),
 				tool("pilot_screenshot", "PNG of a component, or without ref of the active frame or dialog with its open popups "
 								+ "(Search Everywhere, completion, menus) and child dialogs. Painted by default, so it works while "
 								+ "the IDE is covered; popups are clipped to the window.", List.of(),
@@ -224,7 +247,7 @@ final class PilotTools {
 						"popups", "boolean", "Paint the window's popups and child dialogs over it; default true",
 						"mode", "string", "paint (default) or screen: copy the screen pixels at full resolution, exactly as "
 								+ "shown, including popups beyond the window; only correct when nothing covers the IDE"))));
-return result;
+		return result;
 	}
 
 	static JsonObject call(String name, JsonObject arguments) {
@@ -256,7 +279,7 @@ return result;
 						throw new IllegalArgumentException("Give id to run an action, or find to search for one");
 					}
 					if (id != null) {
-						yield IdeActions.run(id, string(arguments, "ref"), string(arguments, "session"), Math.min(number(arguments, "wait", 1), IdeActions.MAX_SECONDS));
+						yield IdeActions.run(id, string(arguments, "ref"), string(arguments, "session"), seconds(arguments, "wait", 1));
 					}
 					yield IdeActions.find(find, limit(arguments));
 				}
@@ -265,12 +288,15 @@ return result;
 					yield IdeSettings.find(required(arguments, "find"), limit);
 				}
 				case "pilot_evaluate" -> Evaluator.eval(required(arguments, "script"), string(arguments, "ref"),
-						string(arguments, "session"), Math.min(number(arguments, "timeout", 30), IdeActions.MAX_SECONDS));
+						string(arguments, "session"), seconds(arguments, "timeout", 30));
+				case "pilot_memory" -> DebuggeeMemory.memory(string(arguments, "op"), required(arguments, "session"),
+						string(arguments, "class"), string(arguments, "filter"), bool(arguments, "hideJdk"), integer(arguments, "limit", 20),
+						seconds(arguments, "timeout", 30));
 				case "pilot_open" -> IdeActions.open(required(arguments, "path"),
 						arguments.has("line") ? arguments.get("line").getAsInt() : null);
 				case "pilot_wait_for" -> {
 					double time = number(arguments, "time", 0);
-					yield IdeActions.waitFor(new IdeActions.Wait(string(arguments, "text"), string(arguments, "gone"),
+					yield WaitFor.until(new WaitFor.Wait(string(arguments, "text"), string(arguments, "gone"),
 									bool(arguments, "smart"), bool(arguments, "idle"), string(arguments, "task"), bool(arguments, "sync"), bool(arguments, "settled"), string(arguments, "console"),
 									string(arguments, "session"), time),
 							number(arguments, "timeout", Math.max(10, time + 10)));
@@ -300,7 +326,7 @@ return result;
 						click = () -> UiClick.click(ref, string(arguments, "button"), clickCount, modifiers);
 					}
 					// a click has run once it returns; one still handled after a second says so itself
-					yield IdeActions.watched(Math.min(number(arguments, "wait", 0), IdeActions.MAX_SECONDS), ran -> {
+					yield IdeActions.watched(seconds(arguments, "wait", 0), ran -> {
 						ran.set(true);
 						return click.get();
 					});
@@ -311,9 +337,7 @@ return result;
 						bool(arguments, "clear"), string(arguments, "hold"), string(arguments, "release"));
 				case "pilot_log" -> {
 					String contains = string(arguments, "contains");
-					String mode = bool(arguments, "notifications") ? "notifications" : bool(arguments, "output") ? "output"
-							: bool(arguments, "consoles") ? "consoles" : bool(arguments, "sessions") ? "sessions" : bool(arguments, "tests") ? "tests" : bool(arguments, "tasks") ? "tasks" : bool(arguments, "freezes") ? "freezes"
-							: bool(arguments, "errors") ? "errors" : "tail";
+					String mode = LOG_MODES.stream().filter(m -> bool(arguments, m)).findFirst().orElse("tail");
 					yield switch (mode) {
 						case "notifications" -> IdeLog.notifications(integer(arguments, "lines", 20), contains);
 						case "output" -> IdeLog.output(integer(arguments, "lines", 50), contains);
@@ -335,6 +359,7 @@ return result;
 			text = "Interrupted";
 			error = true;
 		} catch (RuntimeException e) {
+			LOG.warn("Tool " + name + " failed", e);
 			text = e.getMessage() != null ? e.getMessage() : e.toString();
 			error = true;
 		}
@@ -349,6 +374,8 @@ return result;
 	}
 
 	private static final String REF = "Ref from pilot_snapshot, e.g. e12";
+	/** pilot_log's mode flags, the first one set wins; none set: tail. */
+	private static final List<String> LOG_MODES = List.of("notifications", "output", "consoles", "sessions", "tests", "tasks", "freezes", "errors");
 	private static final String MAX = (int) IdeActions.MAX_SECONDS + " s";
 	/** The tools that may start a run; each marks where the consoles' output ends for pilot_wait_for console. */
 	private static final Set<String> ACTING = Set.of("pilot_action", "pilot_click", "pilot_type", "pilot_evaluate",
@@ -398,6 +425,11 @@ return result;
 
 	private static double number(JsonObject arguments, String name, double fallback) {
 		return arguments.has(name) && !arguments.get(name).isJsonNull() ? arguments.get(name).getAsDouble() : fallback;
+	}
+
+	/** A seconds argument, default {@code fallback}, capped at {@link IdeActions#MAX_SECONDS}. */
+	private static double seconds(JsonObject arguments, String name, double fallback) {
+		return Math.min(number(arguments, name, fallback), IdeActions.MAX_SECONDS);
 	}
 
 	private static String string(JsonObject arguments, String name) {

@@ -37,7 +37,7 @@ import java.util.Locale;
 import java.util.Map;
 
 /** The Run/Debug consoles and Terminal tabs of the open projects: their text, state, and output since a mark. */
-final class RunConsoles {
+public final class RunConsoles {
 	private RunConsoles() {
 	}
 
@@ -76,11 +76,34 @@ final class RunConsoles {
 	}
 
 	/**
-	 * The Run/Debug tab whose name contains {@code session} (case-insensitive), selected and its tool window shown, so
-	 * actions run in its context (the platform skips an action whose context does not show). Of several, the running
-	 * one; fails when none matches or several running ones have different names. Call on the EDT.
+	 * The Run/Debug tab of {@link #run}, selected and its tool window shown, so actions run in its context (the
+	 * platform skips an action whose context does not show). Call on the EDT.
 	 */
 	static Tab tab(String session) {
+		Run run = run(session);
+		RunContentDescriptor descriptor = run.descriptor();
+		RunContentManager manager = RunContentManager.getInstance(run.project());
+		ToolWindow window = manager.getToolWindowByDescriptor(descriptor);
+		if (window != null) {
+			window.show();
+		}
+		manager.selectRunContent(descriptor);
+		Component component = descriptor.getExecutionConsole() != null ? descriptor.getExecutionConsole().getComponent() : descriptor.getComponent();
+		if (component == null) {
+			throw new IllegalStateException("The tab " + descriptor.getDisplayName() + " has no component to run actions in");
+		}
+		return new Tab(component, descriptor.getDisplayName());
+	}
+
+	/** A Run/Debug tab's run and its project. */
+	record Run(RunContentDescriptor descriptor, Project project) {
+	}
+
+	/**
+	 * The run of the Run/Debug tab whose name contains {@code session} (case-insensitive); of several, the running one;
+	 * fails when none matches or several running ones have different names. Call on the EDT.
+	 */
+	static Run run(String session) {
 		List<RunContentDescriptor> matching = new ArrayList<>();
 		Map<RunContentDescriptor, Project> projects = new IdentityHashMap<>();
 		for (Project project : ProjectManager.getInstance().getOpenProjects()) {
@@ -103,18 +126,20 @@ final class RunConsoles {
 					+ session + "\": " + String.join(", ", names) + "; give more of the name");
 		}
 		RunContentDescriptor descriptor = candidates.getLast();
-		Project project = projects.get(descriptor);
-		RunContentManager manager = RunContentManager.getInstance(project);
-		ToolWindow window = manager.getToolWindowByDescriptor(descriptor);
-		if (window != null) {
-			window.show();
+		return new Run(descriptor, projects.get(descriptor));
+	}
+
+	/** The local OS process of the running Run/Debug tab whose name contains {@code session}. Call on the EDT. */
+	public static Process process(String session) {
+		RunContentDescriptor descriptor = run(session).descriptor();
+		ProcessHandler handler = descriptor.getProcessHandler();
+		if (!running(handler)) {
+			throw new IllegalArgumentException("The run " + descriptor.getDisplayName() + " is not running");
 		}
-		manager.selectRunContent(descriptor);
-		Component component = descriptor.getExecutionConsole() != null ? descriptor.getExecutionConsole().getComponent() : descriptor.getComponent();
-		if (component == null) {
-			throw new IllegalStateException("The tab " + descriptor.getDisplayName() + " has no component to run actions in");
+		if (!(handler instanceof BaseProcessHandler<?> local)) {
+			throw new IllegalArgumentException("The run " + descriptor.getDisplayName() + " is not a local process");
 		}
-		return new Tab(component, descriptor.getDisplayName());
+		return local.getProcess();
 	}
 
 	/** Whether {@code handler}'s process runs; stopping is not running: a rerun's old process stops for a while before the new one starts. */
