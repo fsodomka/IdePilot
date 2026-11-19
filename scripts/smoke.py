@@ -222,7 +222,7 @@ def run_in_project(client, project):
         client.call("pilot_wait_for", gone="Trust Project", timeout=30)
     client.call("pilot_wait_for", smart=True, timeout=300)
     # in order: later tests rely on the state earlier ones leave, such as the open editor tabs
-    tests = (test_wait_for, test_evaluate, test_project_view, test_action, test_snapshot, test_tree_clicks,
+    tests = (test_wait_for, test_evaluate, test_evaluate_background, test_evaluate_paint_failure, test_evaluate_output, test_project_view, test_action, test_snapshot, test_tree_clicks,
              test_hover, test_drag_tabs, test_editor, test_synchronize, test_compose, test_scroll, test_hold_release,
              test_type_newline, test_window, test_snapshot_classes, test_tool_window_and_settings, test_screenshot,
              test_log, test_consoles, test_log_tests, test_settings, test_table, test_click_process_mouse_event, test_popup_checked, test_settled, test_tasks,
@@ -257,18 +257,164 @@ def test_wait_for(client, project):
     text = client.fail("pilot_wait_for", sync=True, timeout=0.5)
     assert "no build sync has ended" in text, text
 
+    step("wait_for: evaluate a condition until it becomes true, and timeout while false")
+    window = project_window_ref(client, project)
+    client.call("pilot_window", ref=window)
+    client.call("pilot_evaluate", ref=window, script=(
+        "state.smokeWaitForEvaluate = false; "
+        "Thread.start { Thread.sleep(500); state.smokeWaitForEvaluate = true }; null"))
+    text = client.text("pilot_wait_for", evaluate="state.smokeWaitForEvaluate", timeout=10)
+    assert text.startswith("Done after "), text
+    text = client.fail("pilot_wait_for", evaluate="false", timeout=0.5)
+    assert "Timed out" in text and "evaluate condition `false` is still false" in text, text
+    client.call("pilot_evaluate", ref=window, script="state.remove('smokeWaitForEvaluate'); null")
+
+    step("wait_for: evaluate takes imports, and fails at once on a compile error")
+    text = client.text("pilot_wait_for", evaluate="import java.util.*\nnew ArrayList().isEmpty()", timeout=10)
+    assert text.startswith("Done after "), text
+    start = time.monotonic()
+    text = client.fail("pilot_wait_for", evaluate="1 +", timeout=10)
+    assert "script" in text and "Unexpected input" in text and time.monotonic() - start < 5, text
+
 
 def test_evaluate(client, project):
     step("evaluate")
     # with the window's ref: without one, the focused project, which after a sandbox restart may still be another one
     text = client.text("pilot_evaluate", script="project.basePath", ref=project_window_ref(client, project))
     assert os.path.normcase(os.path.normpath(text.strip())) == os.path.normcase(os.path.normpath(project)), text
+
+    step("evaluate: state kept between calls, scope disposed on rerun and by reset")
+    window = project_window_ref(client, project)
+    client.call("pilot_evaluate", ref=window, script="state.smoke = [1]; null")
+    text = client.text("pilot_evaluate", ref=window, script="state.smoke << 2; state.smoke")
+    assert text.strip() == "[1, 2]", text
+    register = ("state.disposed = 0; com.intellij.openapi.util.Disposer.register(disposable, "
+                "{ state.disposed++ } as com.intellij.openapi.Disposable); null")
+    client.call("pilot_evaluate", ref=window, scope="smoke", script=register)
+    text = client.text("pilot_evaluate", ref=window, scope="smoke", script="state.disposed")
+    assert text.strip() == "1", "the first run's disposable was not disposed: " + text
+    text = client.text("pilot_evaluate", ref=window, reset="smoke")
+    assert 'Disposed scope "smoke"' in text, text
+    text = client.text("pilot_evaluate", ref=window, reset=True)
+    assert "cleared state" in text, text
+    text = client.text("pilot_evaluate", ref=window, script="state.smoke")
+    assert text.strip() == "null", text
+
+    step("evaluate: a script's errors naming the line")
+    text = client.fail("pilot_evaluate", ref=window, script="def x = 1\nx = )\n")
+    assert "script.groovy: 2:" in text, text
+    text = client.fail("pilot_evaluate", ref=window, script="def x = 1\nthrow new RuntimeException('smoke boom')\n")
+    assert "smoke boom (at script.groovy:2)" in text, text
+
+    step("evaluate: a script from a file, its errors naming the file and line")
+    with open(os.path.join(project, "smoke-eval.groovy"), "w", encoding="utf-8") as f:
+        f.write("def base = project.basePath\nbase != null\n")
+    text = client.text("pilot_evaluate", ref=window, file="smoke-eval.groovy")
+    assert text.strip() == "true", text
+    with open(os.path.join(project, "smoke-eval.groovy"), "w", encoding="utf-8") as f:
+        f.write("def x = 1\nx = )\n")
+    text = client.fail("pilot_evaluate", ref=window, file="smoke-eval.groovy")
+    assert "smoke-eval.groovy: 2:" in text, text
+    with open(os.path.join(project, "smoke-eval.groovy"), "w", encoding="utf-8") as f:
+        f.write("def x = 1\nthrow new RuntimeException('smoke boom')\n")
+    text = client.fail("pilot_evaluate", ref=window, file="smoke-eval.groovy")
+    assert "smoke boom" in text and "smoke-eval.groovy:2" in text, text
+    os.remove(os.path.join(project, "smoke-eval.groovy"))
+
+    step("evaluate: a closure's own failure is a plain script error, not a paint failure; reset accepts \"true\"")
+    text = client.fail("pilot_evaluate", ref=window, scope="smoke-closure", script="[1].each { throw new RuntimeException('smoke closure boom') }")
+    assert "smoke closure boom" in text and "(at script.groovy:1)" in text and "pilot_log errors" not in text, text
+    client.call("pilot_evaluate", ref=window, script="state.smokeReset = 1; null")
+    client.call("pilot_evaluate", ref=window, reset="true")
+    text = client.text("pilot_evaluate", ref=window, script="state.smokeReset")
+    assert text.strip() == "null", f"reset=\"true\" did not clear the state: {text}"
+
     step("memory without a session")
     # the smoke project has no Java program running: only that the session is looked up and its absence reported
     text = client.fail("pilot_memory", session="idepilot-smoke-none")
     assert "Run or Debug tabs" in text, text
     text = client.fail("pilot_memory", session="idepilot-smoke-none", op="path", **{"class": "a.B"})
     assert "Run or Debug tabs" in text, text
+
+
+def test_evaluate_background(client, project):
+    step("evaluate: background execution, read action, validation and cancellation")
+    window = project_window_ref(client, project)
+    app = "com.intellij.openapi.application.ApplicationManager.getApplication()"
+
+    text = client.text("pilot_evaluate", ref=window, script=f"{app}.isDispatchThread()")
+    assert text.strip() == "true", f"default evaluation did not run on the EDT: {text}"
+
+    text = client.text("pilot_evaluate", ref=window, background=True,
+                       script=f"{app}.isDispatchThread()")
+    assert text.strip() == "false", f"background evaluation ran on the EDT: {text}"
+
+    text = client.text("pilot_evaluate", ref=window, background=True, readAction=True,
+                       script=f"[edt: {app}.isDispatchThread(), read: {app}.isReadAccessAllowed()]")
+    assert text.strip() == "{edt=false, read=true}", f"readAction did not wrap the background script: {text}"
+
+    text = client.fail("pilot_evaluate", ref=window, readAction=True, script="null")
+    assert "readAction requires background=true" in text, text
+    text = client.fail("pilot_evaluate", session="no such session", background=True, script="null")
+    assert "background cannot be used with session" in text, text
+    text = client.fail("pilot_evaluate", ref=window, background=True, script="def x = 1\nx = )\n")
+    assert "script.groovy: 2:" in text, f"a background compile error was not reported: {text}"
+
+    text = client.fail(
+        "pilot_evaluate", ref=window, background=True, timeout=0.1,
+        script="state.smokeBackgroundInterrupted = false; try { Thread.sleep(10000) } "
+               "catch (InterruptedException e) { state.smokeBackgroundInterrupted = true; "
+               "Thread.currentThread().interrupt() }")
+    assert "No result after 0.1 s" in text and "cancellation requested" in text, text
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        interrupted = client.text(
+            "pilot_evaluate", ref=window, script="state.smokeBackgroundInterrupted")
+        if interrupted.strip() == "true":
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("background timeout did not interrupt the script")
+
+
+def test_evaluate_paint_failure(client, project):
+    step("evaluate: a paint failure during the call is reported with the file and line, and the hint finds the logged error")
+    window = project_window_ref(client, project)
+    # the marker is the one intentional IDE error; test_no_ide_errors allows it
+    script = """import javax.swing.JComponent
+        def bomb = new JComponent() {
+            protected void paintComponent(java.awt.Graphics g) { throw new RuntimeException('smoke-paint-bomb') }
+        }
+        bomb.setBounds(0, 0, 100, 40)
+        def frame = new javax.swing.JFrame(); frame.add(bomb); frame.pack(); frame.setVisible(true)
+        com.intellij.openapi.util.Disposer.register(disposable, { frame.dispose() } as com.intellij.openapi.Disposable)
+        bomb.paintImmediately(0, 0, 100, 40)
+        'returned'"""
+    with open(os.path.join(project, "smoke-paint.groovy"), "w", encoding="utf-8") as f:
+        f.write(script)
+    text = client.fail("pilot_evaluate", ref=window, file="smoke-paint.groovy")
+    assert "smoke-paint.groovy:3" in text and "smoke-paint-bomb" in text, text
+    assert 'pilot_log errors contains="pilotEval_' in text, text
+    hint = re.search(r'contains="(pilotEval_[0-9a-f]+\.groovy)"', text).group(1)
+    # the frame's own first paint, after the call, is what logs the error
+    logged = poll(lambda: client.text("pilot_log", errors=True, contains=hint), lambda t: "smoke-paint-bomb" in t)
+    assert "smoke-paint-bomb" in logged, "the hint finds no logged error: " + logged
+    client.call("pilot_evaluate", ref=window, reset="smoke-paint")
+    os.remove(os.path.join(project, "smoke-paint.groovy"))
+
+
+def test_evaluate_output(client, project):
+    step("evaluate: captured stdout and stderr precede the result or error")
+    text = client.text(
+        "pilot_evaluate",
+        script="System.out.println('smoke stdout'); System.err.println('smoke stderr'); 'smoke result'")
+    assert text.splitlines() == ["smoke stdout", "smoke stderr", "smoke result"], text
+
+    text = client.fail(
+        "pilot_evaluate",
+        script="System.out.println('smoke before error'); throw new RuntimeException('smoke output error')")
+    lines = text.splitlines()
+    assert lines[0] == "smoke before error" and "smoke output error" in text and "script.groovy:1" in text, text
 
 
 def test_project_view(client, project):
@@ -687,6 +833,40 @@ def test_screenshot(client, project):
     image = next(c for c in content if c["type"] == "image")
     assert base64.b64decode(image["data"])[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
 
+    step("screenshot: select a frame by title without a snapshot; report ambiguous titles")
+    unique_scope = "smoke-screenshot-unique"
+    ambiguous_scope = "smoke-screenshot-ambiguous"
+    unique_title = "idepilot-smoke-window-selector-Alpha"
+    try:
+        script = (
+            f"def frame = new javax.swing.JFrame('{unique_title}'); frame.setSize(320, 200); "
+            "com.intellij.openapi.util.Disposer.register(disposable, "
+            "{ frame.dispose() } as com.intellij.openapi.Disposable); "
+            "frame.visible = true; frame.title")
+        client.call("pilot_evaluate", scope=unique_scope, script=script)
+        text, content = client.call(
+            "pilot_screenshot", window="window-selector-alpha", popups=False)
+        image = next(c for c in content if c["type"] == "image")
+        assert base64.b64decode(image["data"])[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+        assert 'window "window-selector-alpha"' in text, text
+
+        titles = ("idepilot-smoke-window-ambiguous-one", "idepilot-smoke-window-ambiguous-two")
+        frames = ", ".join(json.dumps(title) for title in titles)
+        script = (
+            f"def frames = [{frames}].collect {{ title -> "
+            "def frame = new javax.swing.JFrame(title); frame.setSize(320, 200); "
+            "com.intellij.openapi.util.Disposer.register(disposable, "
+            "{ frame.dispose() } as com.intellij.openapi.Disposable); "
+            "frame.visible = true; frame }; frames*.title")
+        client.call("pilot_evaluate", scope=ambiguous_scope, script=script)
+        text = client.fail(
+            "pilot_screenshot", window="window-ambiguous", popups=False)
+        assert "Several visible frames or dialogs" in text, text
+        assert all(title in text for title in titles), text
+    finally:
+        client.call("pilot_evaluate", reset=unique_scope)
+        client.call("pilot_evaluate", reset=ambiguous_scope)
+
 
 def test_log(client, project):
     step("log")
@@ -710,10 +890,11 @@ def test_consoles(client, project):
     step("log: Run consoles of real runs")
     # a plain Run console (ConsoleViewImpl), as Application and Gradle runs use
     run_echo(client, "smoke plain", "smoke-plain")
+    # Wait for the actual output, not the command echo which also contains "smoke-plain".
+    wait_for_console(client, "smoke plain", "smoke-plain")
     text = client.text("pilot_wait_for", console="smoke-plain", timeout=30)
     # the matched line, under its tab's name
     assert "\n- smoke plain: smoke-plain" in text, text
-    wait_for_console(client, "smoke plain", "smoke-plain")
     # a Shell Script run configuration, whose console is a terminal (TerminalExecutionConsole); not saved in the project
     client.call("pilot_evaluate", script="""
         def type = com.intellij.execution.configurations.ConfigurationType.CONFIGURATION_TYPE_EP.extensionList
@@ -979,7 +1160,14 @@ def test_tasks(client, project):
     text = poll(lambda: client.text("pilot_log", tasks=True), lambda t: "[" in t)
     assert "No background task runs" not in text, text
     client.call("pilot_wait_for", task="no such task", timeout=5)
-    client.call("pilot_wait_for", idle=True, timeout=20)
+    # after a fresh sandbox start, analysing the JDK's Thread.java can take over 20 s; the tool caps a call at 50 s,
+    # so keep waiting for up to 150 s before failing
+    for attempt in range(3):
+        text, _, error = client.tool("pilot_wait_for", {"idle": True, "timeout": 50})
+        if not error:
+            break
+        if "Timed out" not in text or attempt == 2:
+            raise AssertionError(f"pilot_wait_for idle failed: {text}")
 
 
 def test_terminal(client, project):
@@ -1087,6 +1275,37 @@ public class Grow {
 """
 
 
+def test_evaluate_debug_session(client, project, debug_title):
+    step("evaluate: state and disposable in debugger mode")
+    scope = "smoke-debug-evaluate"
+    first = (
+        "state.smokeDebug = [1]; state.smokeDebugDisposed = 0; "
+        "com.intellij.openapi.util.Disposer.register(disposable, "
+        "{ state.smokeDebugDisposed++ } as com.intellij.openapi.Disposable); "
+        "[project.name, session.sessionName, vm != null, debugProcess != null]")
+    try:
+        text = client.text("pilot_evaluate", session=debug_title, scope=scope, script=first)
+        assert os.path.basename(project) in text and debug_title in text and "true" in text, text
+
+        rerun = (
+            "state.smokeDebug << 2; "
+            "com.intellij.openapi.util.Disposer.register(disposable, "
+            "{ state.smokeDebugDisposed++ } as com.intellij.openapi.Disposable); "
+            "[state.smokeDebug, state.smokeDebugDisposed]")
+        text = client.text("pilot_evaluate", session=debug_title, scope=scope, script=rerun)
+        assert "[1, 2]" in text and "1" in text, text
+
+        text = client.text("pilot_evaluate", session=debug_title, reset=scope)
+        assert f'Disposed scope "{scope}"' in text, text
+        text = client.text("pilot_evaluate", session=debug_title, script="state.smokeDebugDisposed")
+        assert text.strip() == "2", f"scope reset did not dispose the debugger run: {text}"
+
+        text = client.text("pilot_evaluate", session=debug_title, reset=True)
+        assert "cleared state" in text, text
+    finally:
+        client.call("pilot_evaluate", session=debug_title, reset=scope)
+
+
 def test_memory_growth(client, project):
     step("memory baseline and diff: growth by the number of repeats, in a Run tab and in a debug session")
     source_dir = tempfile.mkdtemp(prefix="idepilot-smoke-java")
@@ -1141,6 +1360,7 @@ def test_memory_growth(client, project):
         start = time.monotonic()
         grows(debug_title, jdwp_title)
         print(f"  debug session (JDI): {time.monotonic() - start:.1f} s", flush=True)
+        test_evaluate_debug_session(client, project, debug_title)
     finally:
         client.call("pilot_evaluate", script=f"""
             com.intellij.xdebugger.XDebuggerManager.getInstance(project).debugSessions
@@ -1158,7 +1378,8 @@ def test_no_ide_errors(client, project):
     # configurator refreshes files on the EDT, which SlowOperations logs as an error
     known = ("com.intellij.diagnostic.MessagePool.instance.getFatalErrors(true, true).count { "
              "!(it.throwableText.contains('Slow operations are prohibited on EDT') "
-             "&& it.throwableText.contains('runDirectoryProjectConfigurators')) }")
+             "&& it.throwableText.contains('runDirectoryProjectConfigurators')) "
+             "&& !it.throwableText.contains('smoke-paint-bomb') }")
     if client.text("pilot_evaluate", script=known).strip() != "0":
         raise AssertionError("the IDE caught exceptions:\n" + client.text("pilot_log", errors=True, lines=20))
 

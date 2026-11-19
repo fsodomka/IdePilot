@@ -180,12 +180,13 @@ final class PilotTools {
 						"path", "string", "Absolute path of a project directory or a file",
 						"line", "integer", "1-based line to go to in a file"),
 				tool("pilot_wait_for", "Wait until all the given conditions hold: text shows in the UI, text is gone, "
-								+ "indexing, all background tasks, a named one or a build sync have finished, the UI has settled, text shows in a Run console or Terminal tab, and/or time "
+					+ "indexing, all background tasks, a named one or a build sync have finished, the UI has settled, a Groovy condition is truthy, text shows in a Run console or Terminal tab, and/or time "
 								+ "has passed. With text, returns the snapshot lines that contain it, with their refs; with console, "
 								+ "the new console lines that contain it, with their tab's name.",
 						List.of(),
 						"text", "string", "Wait until this text shows in a window, component or row",
 						"gone", "string", "Wait until this text no longer shows",
+				"evaluate", "string", "Groovy script (imports allowed) whose last value is the condition, polled every 200 ms in a read action with project and state bound until truthy; a script error fails the wait",
 						"smart", "boolean", "Wait until no open project is opening or indexing",
 						"idle", "boolean", "Wait until no background task runs (progress in the status bar: "
 								+ "indexing, Gradle sync, builds, ...)",
@@ -208,16 +209,27 @@ final class PilotTools {
 						"time", "number", "Wait at least this many seconds; alone, a plain pause; at most " + MAX,
 						"timeout", "number", "Seconds before failing, default 10, or time + 10 with time; capped at " + MAX
 								+ " (MCP clients give up on a call after 60 s), so wait longer in several calls"),
-				tool("pilot_evaluate", "Run a Groovy script inside the IDE on the UI thread and return its result as text. "
+			tool("pilot_evaluate", "Run a Groovy script inside the IDE; printed stdout/stderr precedes its result or error, capped at 100,000 characters. "
+					+ "By default it runs on the EDT; background=true uses a pooled thread, and readAction=true (requires background) wraps read-only PSI/index work. Use invokeLater/Edt for UI work, prefer isX() for booleans, and run index access in background. "
 								+ "Bindings: project (ref's project, else the focused or first open project), component (ref's component or null). "
+					+ "Also state (a map per project kept between calls) and disposable (disposed before the next run of "
+					+ "the same scope, or by reset; register extensions, listeners, windows against it). "
 								+ "Wrap changes in WriteCommandAction; reads may need ReadAction.",
-						List.of("script"),
-						"script", "string", "Groovy source; the value of the last expression is returned",
+				List.of(),
+				"script", "string", "Groovy source; the value of the last expression is returned. Give script or file",
+				"file", "string", "A Groovy file (UTF-8) to run instead of script, absolute or relative to the project's base path; "
+					+ "errors name it and the line",
+				"scope", "string", "Name of the run whose disposable is disposed before the next run with the same name; "
+					+ "default the file's base name, so give scope to keep same-named files in different directories apart. Without scope or file, disposable lasts until reset",
+				"reset", "string", "Before running: a scope's name to dispose it, or true to dispose every scope and clear state; "
+					+ "alone, only resets",
 						"ref", "string", REF + "; also runs the script in that component's dialog",
 						"session", "string", "Run on the debugger thread of the Java debug session whose name contains this "
 								+ "(case-insensitive), binding vm (the debuggee's JDI VirtualMachine, e.g. "
 								+ "vm.classesByName('a.B')[0].methods()), debugProcess and session; works while the program runs. The debugger waits for the script: "
 								+ "keep it short",
+				"background", "boolean", "Run on a pooled thread instead of the UI thread; UI work must use invokeLater/Edt",
+				"readAction", "boolean", "Requires background; hold a read action around the script for read-only PSI/index access",
 						"timeout", "number", "Seconds to wait for the result, default 30, at most " + MAX),
 				tool("pilot_memory", "Heap of a running Java program: live instances per class and their growth since a "
 								+ "baseline, and the chain of references keeping an instance alive (from a heap dump). Works in a "
@@ -239,10 +251,9 @@ final class PilotTools {
 								+ "also from path's holders; primitive arrays stay. Default false",
 						"limit", "integer", "Most classes listed, default 20",
 						"timeout", "number", "Seconds to wait, default 30, at most " + MAX + "; the debugger waits too"),
-				tool("pilot_screenshot", "PNG of a component, or without ref of the active frame or dialog with its open popups "
-								+ "(Search Everywhere, completion, menus) and child dialogs. Painted by default, so it works while "
-								+ "the IDE is covered; popups are clipped to the window.", List.of(),
+			tool("pilot_screenshot", "PNG of a component, or of the active frame or dialog with its open popups. Use window to select a visible frame or dialog by title without a snapshot. Painted by default, so it works while the IDE is covered; popups are clipped to the window.", List.of(),
 						"ref", "string", REF,
+				"window", "string", "Case-insensitive substring of a visible frame or dialog title; must match one window. Give ref or window, not both",
 						"path", "string", "Also save the PNG to this file",
 						"popups", "boolean", "Paint the window's popups and child dialogs over it; default true",
 						"mode", "string", "paint (default) or screen: copy the screen pixels at full resolution, exactly as "
@@ -260,7 +271,7 @@ final class PilotTools {
 		try {
 			text = switch (name) {
 				case "pilot_screenshot" -> {
-					Screenshot.Shot shot = Screenshot.take(string(arguments, "ref"), string(arguments, "path"),
+					Screenshot.Shot shot = Screenshot.take(string(arguments, "ref"), string(arguments, "window"), string(arguments, "path"),
 							!arguments.has("popups") || bool(arguments, "popups"), "screen".equals(string(arguments, "mode")));
 					JsonObject image = new JsonObject();
 					image.addProperty("type", "image");
@@ -269,7 +280,8 @@ final class PilotTools {
 					contents.add(image);
 					yield shot.description();
 				}
-				case "pilot_snapshot" -> UiSnapshot.snapshot(integer(arguments, "offset", 0), integer(arguments, "limit", 150), string(arguments, "next"), bool(arguments, "bounds"), string(arguments, "find"),
+				case "pilot_snapshot" ->
+					UiSnapshot.snapshot(integer(arguments, "offset", 0), integer(arguments, "limit", 150), string(arguments, "next"), bool(arguments, "bounds"), string(arguments, "find"),
 						format(string(arguments, "format")), bool(arguments, "allRows"), bool(arguments, "windowsOnly"),
 						bool(arguments, "classes"));
 				case "pilot_action" -> {
@@ -287,8 +299,14 @@ final class PilotTools {
 					int limit = limit(arguments); // checked before find, as before
 					yield IdeSettings.find(required(arguments, "find"), limit);
 				}
-				case "pilot_evaluate" -> Evaluator.eval(required(arguments, "script"), string(arguments, "ref"),
-						string(arguments, "session"), seconds(arguments, "timeout", 30));
+				case "pilot_evaluate" -> {
+					// The schema types reset as a string, so clients send true as "true": both mean every scope
+					String reset = string(arguments, "reset");
+					boolean resetAll = "true".equalsIgnoreCase(reset);
+					String resetScope = resetAll || "false".equalsIgnoreCase(reset) ? null : reset;
+					yield Evaluator.eval(string(arguments, "script"), string(arguments, "file"), string(arguments, "scope"), resetScope, resetAll,
+						string(arguments, "ref"), string(arguments, "session"), bool(arguments, "background"), bool(arguments, "readAction"), seconds(arguments, "timeout", 30));
+				}
 				case "pilot_memory" -> DebuggeeMemory.memory(string(arguments, "op"), required(arguments, "session"),
 						string(arguments, "class"), string(arguments, "filter"), bool(arguments, "hideJdk"), integer(arguments, "limit", 20),
 						seconds(arguments, "timeout", 30));
@@ -298,12 +316,13 @@ final class PilotTools {
 					double time = number(arguments, "time", 0);
 					yield WaitFor.until(new WaitFor.Wait(string(arguments, "text"), string(arguments, "gone"),
 									bool(arguments, "smart"), bool(arguments, "idle"), string(arguments, "task"), bool(arguments, "sync"), bool(arguments, "settled"), string(arguments, "console"),
-									string(arguments, "session"), time),
+							string(arguments, "session"), time, string(arguments, "evaluate")),
 							number(arguments, "timeout", Math.max(10, time + 10)));
 				}
 				case "pilot_scroll" -> UiScroll.scroll(string(arguments, "ref"), string(arguments, "direction"),
 						number(arguments, "pages", 1), string(arguments, "to"));
-				case "pilot_window" -> UiWindow.window(UiWindow.WindowRequest.parse(string(arguments, "ref"), string(arguments, "size"), string(arguments, "position"),
+				case "pilot_window" ->
+					UiWindow.window(UiWindow.WindowRequest.parse(string(arguments, "ref"), string(arguments, "size"), string(arguments, "position"),
 						optionalBool(arguments, "maximize"),
 						string(arguments, "anchor"), string(arguments, "type"), bool(arguments, "close")));
 				case "pilot_click" -> {
@@ -331,9 +350,11 @@ final class PilotTools {
 						return click.get();
 					});
 				}
-				case "pilot_editor" -> UiEditor.editor(new UiEditor.Request(string(arguments, "ref"), string(arguments, "lines"),
+				case "pilot_editor" ->
+					UiEditor.editor(new UiEditor.Request(string(arguments, "ref"), string(arguments, "lines"),
 						string(arguments, "caret"), string(arguments, "select"), bool(arguments, "problems"), bool(arguments, "actions"), string(arguments, "apply")));
-				case "pilot_type" -> UiInput.type(string(arguments, "ref"), string(arguments, "text"), string(arguments, "key"),
+				case "pilot_type" ->
+					UiInput.type(string(arguments, "ref"), string(arguments, "text"), string(arguments, "key"),
 						bool(arguments, "clear"), string(arguments, "hold"), string(arguments, "release"));
 				case "pilot_log" -> {
 					String contains = string(arguments, "contains");
@@ -341,10 +362,13 @@ final class PilotTools {
 					yield switch (mode) {
 						case "notifications" -> IdeLog.notifications(integer(arguments, "lines", 20), contains);
 						case "output" -> IdeLog.output(integer(arguments, "lines", 50), contains);
-						case "consoles" -> RunConsoles.consoles(integer(arguments, "lines", 50), contains, string(arguments, "session"),
+						case "consoles" ->
+							RunConsoles.consoles(integer(arguments, "lines", 50), contains, string(arguments, "session"),
 								bool(arguments, "running"));
-						case "sessions" -> RunConsoles.sessions(string(arguments, "session"), bool(arguments, "running"));
-						case "tests" -> TestResults.tests(integer(arguments, "lines", 50), contains, string(arguments, "session"),
+						case "sessions" ->
+							RunConsoles.sessions(string(arguments, "session"), bool(arguments, "running"));
+						case "tests" ->
+							TestResults.tests(integer(arguments, "lines", 50), contains, string(arguments, "session"),
 								bool(arguments, "running"));
 						case "tasks" -> BackgroundTasks.tasks(integer(arguments, "lines", 50), contains);
 							case "freezes" -> IdeLog.freezes(integer(arguments, "lines", 5), contains);

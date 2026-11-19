@@ -49,6 +49,7 @@ final class ErrorCapture extends Handler {
 	public void publish(LogRecord record) {
 		Throwable thrown = record.getThrown();
 		if (thrown != null && record.getLevel().intValue() >= Level.SEVERE.intValue()) {
+			EvalScopes.capturePaintFailure(thrown);
 			add(new Entry(record.getMillis(), record.getMessage(), ExceptionUtil.getThrowableText(thrown)));
 		}
 	}

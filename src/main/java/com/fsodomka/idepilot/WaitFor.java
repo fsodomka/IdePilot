@@ -39,14 +39,14 @@ final class WaitFor {
 	 * Waits until {@code time} seconds have passed and all of: {@code text} shows in the UI, {@code gone} no longer
 	 * shows, with {@code smart} no open project is indexing, with {@code idle} no background task runs, with
 	 * {@code sync} no build sync runs and one ended since the last such wait ({@link BuildSyncs}), and
-	 * {@code console} shows in a Run/Debug console's output since the last pilot call that acted ({@link RunConsoles#markConsoles});
-	 * fails after {@code seconds}. On success, lists the snapshot lines that contain {@code text}, with their refs, and
+	 * {@code console} shows in a Run/Debug console's output since the last pilot call that acted ({@link RunConsoles#markConsoles}), and
+	 * {@code evaluate} is a truthy Groovy condition over the focused project's bindings; fails after {@code seconds}. On success, lists the snapshot lines that contain {@code text}, with their refs, and
 	 * the new console lines that contain {@code console}, with their tab's name.
 	 */
 	static String until(Wait wait, double seconds) throws InterruptedException {
 		if (wait.text() == null && wait.gone() == null && !wait.smart() && !wait.idle() && wait.task() == null && !wait.sync()
-				&& !wait.settled() && wait.console() == null && wait.time() <= 0) {
-			throw new IllegalArgumentException("Give text, gone, smart, idle, task, sync, settled, console or time");
+			&& !wait.settled() && wait.console() == null && wait.evaluate() == null && wait.time() <= 0) {
+			throw new IllegalArgumentException("Give text, gone, evaluate, smart, idle, task, sync, settled, console or time");
 		}
 		if (wait.session() != null && wait.console() == null) {
 			throw new IllegalArgumentException("session limits console; give console too");
@@ -73,8 +73,22 @@ final class WaitFor {
 		String lastUi = null;
 		String changed = null;
 		long uiSince = 0;
+		try (Evaluator.Condition condition = wait.evaluate() == null ? null : Evaluator.condition(wait.evaluate())) {
 		while (true) {
+				if (wait.text() != null || wait.gone() != null || wait.settled()) {
+					EvalScopes.PaintFailure paintFailure = Edt.compute(EvalScopes::visiblePaintFailure);
+					if (paintFailure != null) {
+						throw new IllegalStateException(paintFailure.screenshotMessage());
+					}
+				}
 			String missing = missing(wait, marks);
+				if (missing == null && condition != null) {
+					long remaining = deadline - System.nanoTime();
+					String expression = wait.evaluate().replaceAll("\\s+", " ").strip();
+					if (remaining <= 0 || !condition.test(Math.max(remaining / 1e9, 1))) {
+						missing = "evaluate condition `" + abbreviate(expression) + "` is still false";
+					}
+				}
 			long now = System.nanoTime();
 			if (missing == null && wait.settled()) {
 				String ui = Edt.compute(UiSnapshot::text);
@@ -109,6 +123,7 @@ final class WaitFor {
 			// poll every 200 ms, but end a plain time wait on time
 			Thread.sleep(missing == null && now < minimum ? Math.clamp((minimum - now) / 1_000_000, 1, 200) : 200);
 		}
+	}
 	}
 
 	/** The snapshot lines that contain {@code text}, at most a few, so the caller can act on their refs. */
@@ -255,7 +270,12 @@ final class WaitFor {
 	 * What pilot_wait_for waits for; null or false parts are not awaited. {@code session} limits {@code console} to
 	 * the Run/Debug tabs whose name contains it.
 	 */
-	record Wait(String text, String gone, boolean smart, boolean idle, String task, boolean sync, boolean settled, String console, String session,
+	record Wait(String text, String gone, boolean smart, boolean idle, String task, boolean sync, boolean settled,
+	            String console, String session,
+				double time, String evaluate) {
+		Wait(String text, String gone, boolean smart, boolean idle, String task, boolean sync, boolean settled, String console, String session,
 			double time) {
+			this(text, gone, smart, idle, task, sync, settled, console, session, time, null);
+		}
 	}
 }

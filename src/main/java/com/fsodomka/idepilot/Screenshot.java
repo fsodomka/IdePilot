@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * A PNG of a component or window. "paint" mode paints it (works while the IDE is covered; logical size), and for a
@@ -36,16 +37,34 @@ final class Screenshot {
 	private Screenshot() {
 	}
 
-	static Shot take(String ref, String path, boolean popups, boolean screen) {
+	static Shot take(String ref, String windowName, String path, boolean popups, boolean screen) {
+		if (ref != null && windowName != null) {
+			throw new IllegalArgumentException("Give ref or window, not both");
+		}
 		Component target = ref == null ? null : UiRefs.component(ref);
 		Object result = Edt.compute(() -> {
-			Component component = target != null ? target : topWindow(activeWindow());
+			Window named = windowName == null ? null : namedWindow(windowName);
+			Component component = target != null ? target : named != null ? named : topWindow(activeWindow());
 			Component painted = component instanceof RootPaneContainer container ? container.getRootPane() : component;
 			if (painted.getWidth() <= 0 || painted.getHeight() <= 0) {
 				throw new IllegalStateException("Nothing to capture: the component has no size");
 			}
-			return screen ? new Rectangle(painted.getLocationOnScreen(), painted.getSize())
-					: paint(painted, popups && component instanceof Window window ? owned(window) : List.of());
+			if (screen) {
+				return new Rectangle(painted.getLocationOnScreen(), painted.getSize());
+			}
+			EvalScopes.PaintFailure remembered = EvalScopes.failureFor(painted);
+			if (remembered != null) {
+				throw new IllegalStateException(remembered.screenshotMessage());
+			}
+			try {
+				return paint(painted, popups && component instanceof Window window ? owned(window) : List.of());
+			} catch (RuntimeException e) {
+				EvalScopes.PaintFailure failure = EvalScopes.capturePaintFailure(e);
+				if (failure != null) {
+					throw new IllegalStateException(failure.screenshotMessage(), e);
+				}
+				throw e;
+			}
 		});
 		BufferedImage image = result instanceof Rectangle bounds ? capture(bounds) : (BufferedImage) result;
 		ByteArrayOutputStream png = new ByteArrayOutputStream();
@@ -61,8 +80,34 @@ final class Screenshot {
 		} catch (IOException e) {
 			throw new UncheckedIOException(e);
 		}
-		return new Shot(png.toByteArray(), image.getWidth() + "x" + image.getHeight() + (ref == null ? " active window" : " " + ref)
+		return new Shot(png.toByteArray(), image.getWidth() + "x" + image.getHeight()
+			+ (windowName != null ? " window \"" + windowName + "\"" : ref == null ? " active window" : " " + ref)
 				+ (screen ? " from the screen" : "") + (path == null ? "" : ", saved to " + path));
+	}
+
+	/** A visible frame or dialog whose title contains {@code query}, case-insensitively. Call on the EDT. */
+	private static Window namedWindow(String query) {
+		if (query.isBlank()) {
+			throw new IllegalArgumentException("window must not be blank");
+		}
+		List<Window> visible = Arrays.stream(Window.getWindows())
+			.filter(Window::isShowing)
+			.filter(window -> window instanceof Frame || window instanceof Dialog)
+			.toList();
+		String needle = query.toLowerCase(Locale.ROOT);
+		List<Window> matches = visible.stream()
+			.filter(window -> title(window).toLowerCase(Locale.ROOT).contains(needle))
+			.toList();
+		if (matches.size() == 1) {
+			return matches.getFirst();
+		}
+		List<String> titles = (matches.isEmpty() ? visible : matches).stream().map(Screenshot::title).toList();
+		throw new IllegalArgumentException((matches.isEmpty() ? "No visible frame or dialog" : "Several visible frames or dialogs")
+			+ " match window \"" + query + "\"; titles: " + titles);
+	}
+
+	private static String title(Window window) {
+		return window instanceof Frame frame ? frame.getTitle() : ((Dialog) window).getTitle();
 	}
 
 	/** {@code base} painted, then each of {@code overlays} (root panes of windows) at its place relative to it. */

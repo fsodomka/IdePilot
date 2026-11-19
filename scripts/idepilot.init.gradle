@@ -7,7 +7,9 @@
 //   idePilotToken  the MCP token (optional; without it the sandbox generates one, see Settings | Tools | IDE Pilot)
 // Run: ./gradlew runIdePilot [-PidePilotPort=63402] [-PplatformVersion=...]. The sandbox's MCP port defaults to 63402:
 // not 63400, the plugin's default, which the IDE you develop in holds, nor 63401, IDE Pilot's own sandbox.
-// IDE Pilot needs IntelliJ 2025.2 (build 252) or newer in the sandbox.
+// IDE Pilot needs IntelliJ 2025.2 (build 252) or newer in the sandbox, while a plugin's build may compile against an
+// older IDE: raise the platform for this task only, with -PplatformVersion=2026.2.3, or default it in the build for
+// runIdePilot alone, never for the build's other tasks.
 
 allprojects {
     // IDE Pilot's own build runs its sandbox with runIde
